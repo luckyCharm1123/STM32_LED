@@ -83,4 +83,84 @@ void HAL_MspInit(void)
 
 /* USER CODE BEGIN 1 */
 
+/**
+  * @brief UART MSP Initialization 
+  *        This function configures the hardware resources used in this example
+  * @param huart: UART handle pointer
+  * @retval None
+  */
+void HAL_UART_MspInit(UART_HandleTypeDef *huart)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  
+  if(huart->Instance == USART2)
+  {
+    /* USER CODE BEGIN USART2_MspInit 0 */
+    
+    /* USER CODE END USART2_MspInit 0 */
+    
+    /* Peripheral clock enable */
+    __HAL_RCC_USART2_CLK_ENABLE();  // 使能USART2时钟
+    
+    /* USART2 GPIO Configuration    
+    PA2     ------> USART2_TX
+    PA3     ------> USART2_RX
+    */
+    __HAL_RCC_GPIOA_CLK_ENABLE();   // 使能GPIOA时钟（如果还没有使能）
+    
+    /* 配置USART2_TX引脚 (PA2) */
+    GPIO_InitStruct.Pin = USART2_TX_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;          // 复用推挽输出
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;    // 高速模式
+    GPIO_InitStruct.Pull = GPIO_NOPULL;              // 无上下拉
+    HAL_GPIO_Init(USART2_TX_GPIO_Port, &GPIO_InitStruct);
+    
+    /* 配置USART2_RX引脚 (PA3) */
+    GPIO_InitStruct.Pin = USART2_RX_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_INPUT;       // 复用输入模式
+    GPIO_InitStruct.Pull = GPIO_NOPULL;              // 无上下拉
+    HAL_GPIO_Init(USART2_RX_GPIO_Port, &GPIO_InitStruct);
+    
+    /* USART2中断配置 */
+    HAL_NVIC_SetPriority(USART2_IRQn, 0, 0);         // 设置中断优先级
+    HAL_NVIC_EnableIRQ(USART2_IRQn);                // 使能USART2中断
+    
+    /* USER CODE BEGIN USART2_MspInit 1 */
+    
+    /* USER CODE END USART2_MspInit 1 */
+  }
+}
+
+/**
+  * @brief UART MSP De-Initialization 
+  *        This function release the hardware resources used in this example
+  * @param huart: UART handle pointer
+  * @retval None
+  */
+void HAL_UART_MspDeInit(UART_HandleTypeDef *huart)
+{
+  if(huart->Instance == USART2)
+  {
+    /* USER CODE BEGIN USART2_MspDeInit 0 */
+    
+    /* USER CODE END USART2_MspDeInit 0 */
+    
+    /* Peripheral clock disable */
+    __HAL_RCC_USART2_CLK_DISABLE();  // 禁用USART2时钟
+    
+    /* USART2 GPIO Configuration    
+    PA2     ------> USART2_TX
+    PA3     ------> USART2_RX
+    */
+    HAL_GPIO_DeInit(GPIOA, USART2_TX_Pin | USART2_RX_Pin);  // 复位GPIO引脚
+    
+    /* USART2中断禁用 */
+    HAL_NVIC_DisableIRQ(USART2_IRQn);  // 禁用USART2中断
+    
+    /* USER CODE BEGIN USART2_MspDeInit 1 */
+    
+    /* USER CODE END USART2_MspDeInit 1 */
+  }
+}
+
 /* USER CODE END 1 */

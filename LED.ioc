@@ -1,87 +1,135 @@
 #MicroXplorer Configuration settings - do not modify
+# STM32CubeMX 项目配置文件 - 请勿手动修改此文件
 CAD.formats=
 CAD.pinconfig=
 CAD.provider=
 File.Version=6
 GPIO.groupedBy=
 KeepUserPlacement=false
-Mcu.CPN=STM32F103C8T6
-Mcu.Family=STM32F1
-Mcu.IP0=NVIC
-Mcu.IP1=RCC
-Mcu.IP2=SYS
-Mcu.IPNb=3
-Mcu.Name=STM32F103C(8-B)Tx
-Mcu.Package=LQFP48
-Mcu.Pin0=PA6
-Mcu.Pin1=PA13
-Mcu.Pin2=PA14
-Mcu.Pin3=VP_SYS_VS_Systick
-Mcu.PinsNb=4
-Mcu.ThirdPartyNb=0
-Mcu.UserConstants=
-Mcu.UserName=STM32F103C8Tx
-MxCube.Version=6.15.0
-MxDb.Version=DB.6.0.150
-NVIC.BusFault_IRQn=true\:0\:0\:false\:false\:true\:false\:false\:false
-NVIC.DebugMonitor_IRQn=true\:0\:0\:false\:false\:true\:false\:false\:false
-NVIC.ForceEnableDMAVector=true
-NVIC.HardFault_IRQn=true\:0\:0\:false\:false\:true\:false\:false\:false
-NVIC.MemoryManagement_IRQn=true\:0\:0\:false\:false\:true\:false\:false\:false
-NVIC.NonMaskableInt_IRQn=true\:0\:0\:false\:false\:true\:false\:false\:false
-NVIC.PendSV_IRQn=true\:0\:0\:false\:false\:true\:false\:false\:false
-NVIC.PriorityGroup=NVIC_PRIORITYGROUP_4
-NVIC.SVCall_IRQn=true\:0\:0\:false\:false\:true\:false\:false\:false
-NVIC.SysTick_IRQn=true\:15\:0\:false\:false\:true\:false\:true\:false
-NVIC.UsageFault_IRQn=true\:0\:0\:false\:false\:true\:false\:false\:false
-PA13.Mode=Serial_Wire
-PA13.Signal=SYS_JTMS-SWDIO
-PA14.Mode=Serial_Wire
-PA14.Signal=SYS_JTCK-SWCLK
-PA6.GPIOParameters=GPIO_Label
-PA6.GPIO_Label=LED
-PA6.Locked=true
-PA6.Signal=GPIO_Output
-PinOutPanel.RotationAngle=0
-ProjectManager.AskForMigrate=true
-ProjectManager.BackupPrevious=false
-ProjectManager.CompilerLinker=GCC
-ProjectManager.CompilerOptimize=6
-ProjectManager.ComputerToolchain=false
-ProjectManager.CoupleFile=false
-ProjectManager.CustomerFirmwarePackage=
-ProjectManager.DefaultFWLocation=true
-ProjectManager.DeletePrevious=true
-ProjectManager.DeviceId=STM32F103C8Tx
-ProjectManager.FirmwarePackage=STM32Cube FW_F1 V1.8.6
-ProjectManager.FreePins=false
-ProjectManager.HalAssertFull=false
-ProjectManager.HeapSize=0x200
-ProjectManager.KeepUserCode=true
-ProjectManager.LastFirmware=true
-ProjectManager.LibraryCopy=0
-ProjectManager.MainLocation=Core/Src
-ProjectManager.NoMain=false
-ProjectManager.PreviousToolchain=
-ProjectManager.ProjectBuild=false
-ProjectManager.ProjectFileName=LED.ioc
-ProjectManager.ProjectName=LED
-ProjectManager.ProjectStructure=
-ProjectManager.RegisterCallBack=
-ProjectManager.StackSize=0x400
-ProjectManager.TargetToolchain=CMake
-ProjectManager.ToolChainLocation=
-ProjectManager.UAScriptAfterPath=
-ProjectManager.UAScriptBeforePath=
-ProjectManager.UnderRoot=false
-ProjectManager.functionlistsort=1-SystemClock_Config-RCC-false-HAL-false,2-MX_GPIO_Init-GPIO-false-HAL-true
-RCC.APB1Freq_Value=8000000
-RCC.APB2Freq_Value=8000000
-RCC.FamilyName=M
-RCC.IPParameters=APB1Freq_Value,APB2Freq_Value,FamilyName,PLLCLKFreq_Value,PLLMCOFreq_Value,TimSysFreq_Value
-RCC.PLLCLKFreq_Value=8000000
-RCC.PLLMCOFreq_Value=4000000
-RCC.TimSysFreq_Value=8000000
-VP_SYS_VS_Systick.Mode=SysTick
-VP_SYS_VS_Systick.Signal=SYS_VS_Systick
-board=custom
+
+# MCU 配置信息
+Mcu.CPN=STM32F103C8T6          # MCU 型号：STM32F103C8T6，ARM Cortex-M3 内核
+Mcu.Family=STM32F1             # MCU 系列：STM32F1 系列
+Mcu.IP0=NVIC                   # 外设0：嵌套向量中断控制器
+Mcu.IP1=RCC                    # 外设1：复位和时钟控制
+Mcu.IP2=SYS                    # 外设2：系统配置
+Mcu.IPNb=3                     # 外设数量：3个
+Mcu.Name=STM32F103C(8-B)Tx     # MCU 名称
+Mcu.Package=LQFP48             # 封装类型：LQFP48（48引脚）
+Mcu.Pin0=PA2                   # 引脚0：PA2
+Mcu.Pin1=PA3                   # 引脚1：PA3
+Mcu.Pin2=PA6                   # 引脚2：PA6
+Mcu.Pin3=PA13                  # 引脚3：PA13（SWD调试）
+Mcu.Pin4=PA14                  # 引脚4：PA14（SWD调试）
+Mcu.Pin5=VP_SYS_VS_Systick     # 引脚5：SysTick定时器
+Mcu.PinsNb=6                   # 引脚数量：6个
+Mcu.ThirdPartyNb=0             # 第三方组件数量：0
+Mcu.UserConstants=             # 用户常量定义
+Mcu.UserName=STM32F103C8Tx     # 用户定义的MCU名称
+MxCube.Version=6.15.0          # STM32CubeMX 版本号
+MxDb.Version=DB.6.0.150        # 数据库版本号
+
+# NVIC（嵌套向量中断控制器）配置
+NVIC.BusFault_IRQn=true\:0\:0\:false\:false\:true\:false\:false\:false      # 总线错误中断使能
+NVIC.DebugMonitor_IRQn=true\:0\:0\:false\:false\:true\:false\:false\:false  # 调试监视器中断使能
+NVIC.ForceEnableDMAVector=true                                             # 强制使能DMA向量
+NVIC.HardFault_IRQn=true\:0\:0\:false\:false\:true\:false\:false\:false     # 硬件错误中断使能
+NVIC.MemoryManagement_IRQn=true\:0\:0\:false\:false\:true\:false\:false\:false  # 内存管理错误中断使能
+NVIC.NonMaskableInt_IRQn=true\:0\:0\:false\:false\:true\:false\:false\:false    # 不可屏蔽中断使能
+NVIC.PendSV_IRQn=true\:0\:0\:false\:false\:true\:false\:false\:false            # PendSV中断使能
+NVIC.PriorityGroup=NVIC_PRIORITYGROUP_4                                      # 中断优先级分组：第4组
+NVIC.SVCall_IRQn=true\:0\:0\:false\:false\:true\:false\:false\:false           # SVC调用中断使能
+NVIC.SysTick_IRQn=true\:15\:0\:false\:false\:true\:false\:true\:false          # SysTick中断使能，优先级15
+NVIC.UsageFault_IRQn=true\:0\:0\:false\:false\:true\:false\:false\:false       # 使用错误中断使能
+
+# PA13 引脚配置（SWD调试数据线）
+PA13.Mode=Serial_Wire           # 模式：串行调试（SWD）
+PA13.Signal=SYS_JTMS-SWDIO      # 信号：SWD数据线
+
+# PA14 引脚配置（SWD调试时钟线）
+PA14.Mode=Serial_Wire           # 模式：串行调试（SWD）
+PA14.Signal=SYS_JTCK-SWCLK      # 信号：SWD时钟线
+
+# PA2 引脚配置（USART2_TX - 串口2发送）
+PA2.GPIOParameters=GPIO_Label,GPIO_PuPd,GPIO_Speed  # GPIO参数：标签、上下拉、速度
+PA2.GPIO_Label=USART2_TX        # 引脚标签：USART2发送
+PA2.GPIO_PuPd=GPIO_NOPULL       # 上下拉：无上拉下拉
+PA2.GPIO_Speed=GPIO_SPEED_FREQ_LOW  # 速度：低速（2MHz）
+PA2.Locked=true                 # 引脚锁定：是（防止意外修改）
+PA2.Signal=USART2_TX            # 信号：USART2发送
+
+# PA3 引脚配置（USART2_RX - 串口2接收）
+PA3.GPIOParameters=GPIO_Label,GPIO_PuPd,GPIO_Speed  # GPIO参数：标签、上下拉、速度
+PA3.GPIO_Label=USART2_RX        # 引脚标签：USART2接收
+PA3.GPIO_PuPd=GPIO_NOPULL       # 上下拉：无上拉下拉
+PA3.GPIO_Speed=GPIO_SPEED_FREQ_LOW  # 速度：低速（2MHz）
+PA3.Locked=true                 # 引脚锁定：是
+PA3.Signal=USART2_RX            # 信号：USART2接收
+
+# PA6 引脚配置（LED - LED控制）
+PA6.GPIOParameters=GPIO_Label   # GPIO参数：标签
+PA6.GPIO_Label=LED              # 引脚标签：LED
+PA6.Locked=true                 # 引脚锁定：是
+PA6.Signal=GPIO_Output          # 信号：GPIO输出模式
+
+PinOutPanel.RotationAngle=0     # 引脚图旋转角度：0度
+
+# 项目管理器配置
+ProjectManager.AskForMigrate=true       # 询问是否迁移项目
+ProjectManager.BackupPrevious=false      # 不备份之前的文件
+ProjectManager.CompilerLinker=GCC       # 编译器链接器：GCC
+ProjectManager.CompilerOptimize=6       # 编译器优化级别：6（中等优化）
+ProjectManager.ComputerToolchain=false   # 不使用计算机工具链
+ProjectManager.CoupleFile=false         # 不耦合文件
+ProjectManager.CustomerFirmwarePackage=  # 客户固件包
+ProjectManager.DefaultFWLocation=true    # 使用默认固件位置
+ProjectManager.DeletePrevious=true       # 删除之前的生成文件
+ProjectManager.DeviceId=STM32F103C8Tx    # 设备ID
+ProjectManager.FirmwarePackage=STM32Cube FW_F1 V1.8.6  # 固件包版本
+ProjectManager.FreePins=false            # 不显示空闲引脚
+ProjectManager.HalAssertFull=false       # HAL断言完整模式关闭
+ProjectManager.HeapSize=0x200            # 堆大小：512字节
+ProjectManager.KeepUserCode=true         # 保留用户代码
+ProjectManager.LastFirmware=true         # 使用最新固件
+ProjectManager.LibraryCopy=0             # 库复制：0
+ProjectManager.MainLocation=Core/Src     # 主文件位置
+ProjectManager.NoMain=false              # 有主文件
+ProjectManager.PreviousToolchain=        # 之前的工具链
+ProjectManager.ProjectBuild=false        # 项目构建：false
+ProjectManager.ProjectFileName=LED.ioc   # 项目文件名
+ProjectManager.ProjectName=LED           # 项目名称：LED
+ProjectManager.ProjectStructure=         # 项目结构
+ProjectManager.RegisterCallBack=         # 注册回调
+ProjectManager.StackSize=0x400           # 栈大小：1024字节
+ProjectManager.TargetToolchain=CMake     # 目标工具链：CMake
+ProjectManager.ToolChainLocation=        # 工具链位置
+ProjectManager.UAScriptAfterPath=        # 用户脚本后路径
+ProjectManager.UAScriptBeforePath=       # 用户脚本前路径
+ProjectManager.UnderRoot=false           # 不在根目录下
+ProjectManager.functionlistsort=1-SystemClock_Config-RCC-false-HAL-false,2-MX_GPIO_Init-GPIO-false-HAL-true  # 函数列表排序
+
+# RCC（复位和时钟控制）配置
+RCC.APB1Freq_Value=8000000      # APB1总线频率：8MHz
+RCC.APB2Freq_Value=8000000      # APB2总线频率：8MHz
+RCC.FamilyName=M                # 家族名称：M系列
+RCC.IPParameters=APB1Freq_Value,APB2Freq_Value,FamilyName,PLLCLKFreq_Value,PLLMCOFreq_Value,TimSysFreq_Value  # RCC参数
+RCC.PLLCLKFreq_Value=8000000    # PLL时钟频率：8MHz（未使用PLL）
+RCC.PLLMCOFreq_Value=4000000    # MCO时钟频率：4MHz
+RCC.TimSysFreq_Value=8000000    # 系统定时器频率：8MHz
+
+# USART2（串口2）配置
+USART2.IPParameters=HardwareFlowControl,OverSampling,Parity,StopBits,WordLength,BaudRate,Mode  # USART2参数
+USART2.BaudRate=115200          # 波特率：115200
+USART2.HardwareFlowControl=USART_HWCONTROL_NONE  # 硬件流控：无
+USART2.Mode=USART_MODE_TX_RX    # 模式：收发模式
+USART2.OverSampling=USART_OVERSAMPLING_16  # 过采样：16倍
+USART2.Parity=USART_PARITY_NONE # 校验位：无
+USART2.StopBits=USART_STOPBITS_1  # 停止位：1位
+USART2.WordLength=USART_WORDLENGTH_8B  # 数据位：8位
+
+# SysTick（系统定时器）配置
+VP_SYS_VS_Systick.Mode=SysTick  # 模式：SysTick定时器
+VP_SYS_VS_Systick.Signal=SYS_VS_Systick  # 信号：系统定时器
+
+# 板卡配置
+board=custom                   # 板卡类型：自定义
