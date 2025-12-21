@@ -39,6 +39,8 @@
 /* 用户代码开始：包含头文件 */
 #include <stdio.h>  // 用于printf重定向，实现标准输出到串口
 #include <string.h> // 用于字符串操作，如strlen、strncmp、memset等
+#include <stdlib.h> // 用于atoi函数，字符串转整数
+#include "esp.h"    // ESP-01S模块驱动
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -52,6 +54,7 @@
 /* 用户代码开始：私有定义 */
 #define RX_BUFFER_SIZE 128  // 接收缓冲区大小，最大可接收127个字符+1个结束符
 #define TX_BUFFER_SIZE 128  // 发送缓冲区大小，预留128字节
+#define ESP_RX_BUFFER_SIZE 512  // ESP接收缓冲区大小（与esp.c中一致）
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -66,10 +69,23 @@ UART_HandleTypeDef huart2;  // USART2句柄，用于管理串口2的所有操作
 
 /* USER CODE BEGIN PV */
 /* 用户代码开始：私有变量 */
+
+/* 串口接收相关变量 */
 uint8_t rx_buffer[RX_BUFFER_SIZE];  // 接收缓冲区，存储从串口接收到的数据
 uint8_t tx_buffer[TX_BUFFER_SIZE];  // 发送缓冲区，预留用于复杂发送场景
 uint16_t rx_index = 0;              // 接收索引，指示当前接收数据在缓冲区中的位置
 uint8_t rx_complete = 0;            // 接收完成标志，0=正在接收，1=接收完成等待处理
+
+/* ESP模式控制变量 */
+uint8_t esp_mode = 0;               // ESP模式标志，用于切换接收处理逻辑
+                                    // 0 = 用户命令模式（处理用户输入的控制命令）
+                                    // 1 = ESP数据模式（直接接收ESP模块的响应数据）
+
+/* ESP相关外部变量声明（在esp.c中定义） */
+extern uint8_t esp_rx_buffer[512];  // ESP接收缓冲区，用于存储ESP模块返回的原始数据
+extern uint8_t esp_rx_complete;     // ESP接收完成标志，当收到换行符时置1
+extern uint16_t esp_rx_index;       // ESP接收索引，指示当前ESP数据在缓冲区中的位置
+extern uint8_t esp_response_ready;  // ESP响应就绪标志，表示ESP数据已准备好供驱动层处理
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -131,6 +147,7 @@ void USART2_SendString(char *str)
   * @retval None
   * @details 这是主循环中调用的核心处理函数
   *          当接收到完整命令后，解析并执行相应操作
+  *          支持的命令包括：LED控制命令和ESP-01S模块控制命令
   */
 void Process_Received_Data(void)
 {
@@ -145,29 +162,218 @@ void Process_Received_Data(void)
     // 简单的命令处理 - 使用strncmp进行字符串比较
     // strncmp比较前n个字符，防止缓冲区溢出
     
-    // 检查LED_ON命令
-    if(strncmp((char*)rx_buffer, "LED_ON", 6) == 0)
+    // ==================== ESP命令处理 ====================
+    // 检查ESP_INIT命令 - 初始化ESP模块
+    // 用法：在串口输入"ESP_INIT"，执行后会初始化ESP-01S模块
+    // 功能：发送AT指令测试模块、关闭回显、设置Station模式、获取MAC地址
+    if(strncmp((char*)rx_buffer, "ESP_INIT", 8) == 0)
     {
-      HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);  // 设置LED引脚高电平（点亮LED）
-      USART2_SendString("LED turned ON\r\n");  // 发送确认信息
+      USART2_SendString("Initializing ESP-01S...\r\n");
+      if(ESP_Init() == ESP_OK)
+      {
+        ESP_Status_t* status = ESP_GetStatus();
+        USART2_SendString("ESP initialized successfully!\r\n");
+        if(strlen(status->mac_address) > 0)
+        {
+          USART2_SendString("MAC: ");
+          USART2_SendString(status->mac_address);
+          USART2_SendString("\r\n");
+        }
+      }
+      else
+      {
+        USART2_SendString("ESP initialization failed!\r\n");
+      }
     }
-    // 检查LED_OFF命令
-    else if(strncmp((char*)rx_buffer, "LED_OFF", 7) == 0)
+    
+    // 检查ESP_CONNECT命令 - 连接WiFi
+    // 用法：输入"ESP_CONNECT"，系统会提示输入格式
+    // 提示格式：ESP_CONNECT:SSID:PASSWORD
+    else if(strncmp((char*)rx_buffer, "ESP_CONNECT", 11) == 0)
     {
-      HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);  // 设置LED引脚低电平（熄灭LED）
-      USART2_SendString("LED turned OFF\r\n");  // 发送确认信息
+      USART2_SendString("Please enter WiFi credentials in format:\r\n");
+      USART2_SendString("ESP_CONNECT:SSID:PASSWORD\r\n");
+      USART2_SendString("Example: ESP_CONNECT:MyWiFi:MyPassword123\r\n");
     }
-    // 检查STATUS命令
-    else if(strncmp((char*)rx_buffer, "STATUS", 6) == 0)
+    // 处理WiFi连接参数
+    // 解析格式：ESP_CONNECT:SSID:PASSWORD
+    // 例如：ESP_CONNECT:MyHomeWiFi:MyPassword123
+    else if(strncmp((char*)rx_buffer, "ESP_CONNECT:", 12) == 0)
     {
-      uint8_t led_state = HAL_GPIO_ReadPin(LED_GPIO_Port, LED_Pin);  // 读取LED当前状态
-      USART2_SendString("LED Status: ");
-      USART2_SendString(led_state ? "ON\r\n" : "OFF\r\n");  // 根据状态发送相应信息
+      char *ssid_start = (char*)rx_buffer + 12;  // 跳过"ESP_CONNECT:"
+      char *password_start = strchr(ssid_start, ':');  // 查找密码分隔符
+      
+      if(password_start)
+      {
+        *password_start = '\0';  // 分割字符串，将SSID和密码分开
+        char *password = password_start + 1;  // 密码从分隔符后开始
+        
+        USART2_SendString("Connecting to WiFi...\r\n");
+        if(ESP_ConnectWiFi(ssid_start, password) == ESP_OK)
+        {
+          ESP_Status_t* status = ESP_GetStatus();
+          USART2_SendString("WiFi connected!\r\n");
+          if(strlen(status->ip_address) > 0)
+          {
+            USART2_SendString("IP: ");
+            USART2_SendString(status->ip_address);
+            USART2_SendString("\r\n");
+          }
+        }
+        else
+        {
+          USART2_SendString("WiFi connection failed!\r\n");
+        }
+      }
+      else
+      {
+        USART2_SendString("Invalid format! Use: ESP_CONNECT:SSID:PASSWORD\r\n");
+      }
     }
+    
+    // 检查ESP_TCP命令 - 连接TCP服务器
+    // 用法：输入"ESP_TCP"，系统会提示输入格式
+    // 提示格式：ESP_TCP:SERVER:PORT
+    else if(strncmp((char*)rx_buffer, "ESP_TCP", 7) == 0)
+    {
+      USART2_SendString("Please enter TCP connection in format:\r\n");
+      USART2_SendString("ESP_TCP:SERVER:PORT\r\n");
+      USART2_SendString("Example: ESP_TCP:192.168.1.100:8080\r\n");
+    }
+    // 处理TCP连接参数
+    // 解析格式：ESP_TCP:SERVER:PORT
+    // 例如：ESP_TCP:192.168.1.100:8080
+    else if(strncmp((char*)rx_buffer, "ESP_TCP:", 8) == 0)
+    {
+      char *server_start = (char*)rx_buffer + 8;  // 跳过"ESP_TCP:"
+      char *port_start = strchr(server_start, ':');  // 查找端口分隔符
+      
+      if(port_start)
+      {
+        *port_start = '\0';  // 分割字符串，将服务器地址和端口分开
+        uint16_t port = atoi(port_start + 1);  // 将端口字符串转换为整数
+        
+        USART2_SendString("Connecting to TCP server...\r\n");
+        if(ESP_ConnectTCP(server_start, port) == ESP_OK)
+        {
+          USART2_SendString("TCP connected!\r\n");
+        }
+        else
+        {
+          USART2_SendString("TCP connection failed!\r\n");
+        }
+      }
+      else
+      {
+        USART2_SendString("Invalid format! Use: ESP_TCP:SERVER:PORT\r\n");
+      }
+    }
+    
+    // 检查ESP_SEND命令 - 发送TCP数据
+    // 用法：输入"ESP_SEND"，系统会提示输入格式
+    // 提示格式：ESP_SEND:DATA
+    else if(strncmp((char*)rx_buffer, "ESP_SEND", 8) == 0)
+    {
+      USART2_SendString("Please enter data to send in format:\r\n");
+      USART2_SendString("ESP_SEND:DATA\r\n");
+      USART2_SendString("Example: ESP_SEND:Hello Server!\r\n");
+    }
+    // 处理发送数据
+    // 解析格式：ESP_SEND:DATA
+    // 例如：ESP_SEND:Hello Server!
+    else if(strncmp((char*)rx_buffer, "ESP_SEND:", 9) == 0)
+    {
+      char *data = (char*)rx_buffer + 9;  // 跳过"ESP_SEND:"
+      uint16_t len = strlen(data);  // 计算数据长度
+      
+      if(len > 0)
+      {
+        USART2_SendString("Sending data...\r\n");
+        if(ESP_SendTCPData(data, len) == ESP_OK)
+        {
+          USART2_SendString("Data sent successfully!\r\n");
+        }
+        else
+        {
+          USART2_SendString("Failed to send data!\r\n");
+        }
+      }
+      else
+      {
+        USART2_SendString("No data to send!\r\n");
+      }
+    }
+    
+    // 检查ESP_STATUS命令 - 显示ESP状态
+    // 用法：输入"ESP_STATUS"，显示当前ESP模块的所有状态信息
+    // 显示内容：初始化状态、WiFi连接状态、TCP连接状态、IP地址、MAC地址
+    else if(strncmp((char*)rx_buffer, "ESP_STATUS", 10) == 0)
+    {
+      ESP_Status_t* status = ESP_GetStatus();
+      USART2_SendString("=== ESP Status ===\r\n");
+      
+      char buffer[64];
+      snprintf(buffer, sizeof(buffer), "Initialized: %s\r\n", status->initialized ? "Yes" : "No");
+      USART2_SendString(buffer);
+      
+      snprintf(buffer, sizeof(buffer), "WiFi: %s\r\n", status->connected ? "Connected" : "Disconnected");
+      USART2_SendString(buffer);
+      
+      snprintf(buffer, sizeof(buffer), "TCP: %s\r\n", status->tcp_connected ? "Connected" : "Disconnected");
+      USART2_SendString(buffer);
+      
+      if(strlen(status->ip_address) > 0)
+      {
+        USART2_SendString("IP: ");
+        USART2_SendString(status->ip_address);
+        USART2_SendString("\r\n");
+      }
+      
+      if(strlen(status->mac_address) > 0)
+      {
+        USART2_SendString("MAC: ");
+        USART2_SendString(status->mac_address);
+        USART2_SendString("\r\n");
+      }
+    }
+    
+    // 检查ESP_DISCONNECT命令 - 断开连接
+    // 用法：输入"ESP_DISCONNECT"
+    // 功能：断开TCP连接和WiFi连接
+    else if(strncmp((char*)rx_buffer, "ESP_DISCONNECT", 14) == 0)
+    {
+      if(ESP_DisconnectTCP() == ESP_OK)
+      {
+        USART2_SendString("TCP disconnected\r\n");
+      }
+      if(ESP_DisconnectWiFi() == ESP_OK)
+      {
+        USART2_SendString("WiFi disconnected\r\n");
+      }
+    }
+    
+    // 检查ESP_RESTART命令 - 重启ESP模块
+    // 用法：输入"ESP_RESTART"
+    // 功能：通过AT+RST指令重启ESP模块，然后重新初始化
+    else if(strncmp((char*)rx_buffer, "ESP_RESTART", 11) == 0)
+    {
+      USART2_SendString("Restarting ESP module...\r\n");
+      if(ESP_Restart() == ESP_OK)
+      {
+        USART2_SendString("ESP restarted successfully!\r\n");
+      }
+      else
+      {
+        USART2_SendString("ESP restart failed!\r\n");
+      }
+    }
+    
     // 未知命令处理
+    // 当用户输入不支持的命令时，显示可用命令列表
     else
     {
-      USART2_SendString("Unknown command. Try: LED_ON, LED_OFF, STATUS\r\n");
+      USART2_SendString("Unknown command. Available commands:\r\n");
+      USART2_SendString("ESP commands: ESP_INIT, ESP_CONNECT, ESP_TCP, ESP_SEND, ESP_STATUS, ESP_DISCONNECT, ESP_RESTART\r\n");
     }
     
     // 重置接收状态，为下一次接收做准备
@@ -234,14 +440,11 @@ int main(void)
   MX_GPIO_Init();              // 初始化GPIO（LED引脚）
   MX_USART2_UART_Init();       // 初始化USART2（串口）
   
-  /* USER CODE BEGIN 2 */
   /* 用户代码开始：第2区 */
   /* 发送启动信息，告知用户系统已启动 */
-  USART2_SendString("\r\n=== STM32 USART2 Demo ===\r\n");
+  USART2_SendString("\r\n=== STM32 USART2 + ESP-01S Demo ===\r\n");
   USART2_SendString("System initialized successfully!\r\n");
   USART2_SendString("USART2: 115200 8N1, TX=PA2, RX=PA3\r\n");
-  USART2_SendString("Available commands: LED_ON, LED_OFF, STATUS\r\n");
-  USART2_SendString("Please enter a command:\r\n");
   
   /* 启动串口接收中断，开始监听串口数据
    * HAL_UART_Receive_IT()启动中断模式接收
@@ -249,6 +452,18 @@ int main(void)
    * 接收完成后会触发HAL_UART_RxCpltCallback回调函数
    */
   HAL_UART_Receive_IT(&huart2, &rx_buffer[rx_index], 1);
+  
+  /* 自动查询WiFi连接状态 - 系统启动时的可选功能
+   * 延时1秒后发送AT指令查询ESP模块的WiFi连接状态
+   * 这可以帮助用户了解ESP模块是否已经连接到WiFi网络
+   * 注意：如果ESP模块未初始化或未连接，此查询可能无响应
+   */
+  HAL_Delay(1000);
+  USART2_SendString("\r\nChecking WiFi status...\r\n");
+  USART2_SendString("AT+CIPSTA?\r\n");
+  HAL_UART_Transmit(&huart2, (uint8_t*)"AT+CIPSTA?\r\n", 12, HAL_MAX_DELAY);
+  HAL_Delay(500);  // 等待ESP模块响应
+  
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -258,18 +473,9 @@ int main(void)
   {
     /* USER CODE END WHILE */
     
-    /* 处理串口接收的数据 */
-    Process_Received_Data();
-    
-    /* LED闪烁逻辑 - 仅在没有接收数据时闪烁
-     * 这样设计是为了避免LED闪烁干扰用户观察串口交互
-     * 当有命令正在处理时，LED保持当前状态不变
-     */
-    if(!rx_complete)
-    {
-      HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);  // 翻转LED引脚电平（亮/灭切换）
-      HAL_Delay(500);                              // 延时500毫秒
-    }
+    /* LED闪烁逻辑 */
+    HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);  // 翻转LED引脚电平（亮/灭切换）
+    HAL_Delay(500);                              // 延时500毫秒
     
     /* USER CODE BEGIN 3 */
     /* 用户代码开始：第3区 */
@@ -468,32 +674,95 @@ static void MX_GPIO_Init(void)
   *       2. 接收到数据后触发USART2_IRQHandler
   *       3. HAL_UART_IRQHandler处理中断并调用此回调函数
   *       4. 在回调函数中处理数据并准备下一次接收
+  * @note 双模式接收机制：
+  *       - 用户命令模式：接收用户输入的控制命令，以回车/换行结束
+  *       - ESP数据模式：直接接收ESP模块的响应数据，以回车/换行结束
+  *       - 通过esp_mode标志切换两种模式
   */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
   // 检查是否是USART2的中断
   if(huart->Instance == USART2)
   {
-    // 检查是否收到换行符或回车符，表示命令结束
-    // 用户输入命令后通常按回车键，会发送'\r'或'\n'
-    if(rx_buffer[rx_index] == '\r' || rx_buffer[rx_index] == '\n')
+    // ==================== ESP数据模式处理 ====================
+    // 当esp_mode=1时，处于ESP模块数据接收状态
+    // 此时直接将接收到的数据传递给ESP驱动层处理
+    if(esp_mode)
     {
-      rx_buffer[rx_index] = '\0';  // 添加字符串结束符，使字符串函数能正确处理
-      rx_complete = 1;             // 设置接收完成标志，主循环会处理这个命令
+      // 将接收到的字节复制到ESP专用接收缓冲区
+      // rx_buffer[0]是当前接收到的字节（因为每次只接收1个字节）
+      esp_rx_buffer[esp_rx_index] = rx_buffer[0];
+      
+      // 检查是否收到换行符或回车符，表示ESP模块的一行响应结束
+      if(rx_buffer[0] == '\r' || rx_buffer[0] == '\n')
+      {
+        // 确保缓冲区中有数据（不是连续的换行符）
+        if(esp_rx_index > 0)
+        {
+          // 添加字符串结束符，使ESP驱动层能正确解析响应
+          esp_rx_buffer[esp_rx_index] = '\0';
+          // 设置ESP接收完成标志，驱动层会在主循环中处理这个响应
+          esp_rx_complete = 1;
+          // 重置ESP接收索引，为下一次接收做准备
+          esp_rx_index = 0;
+        }
+      }
+      // 检查ESP缓冲区是否还有空间继续接收
+      else if(esp_rx_index < ESP_RX_BUFFER_SIZE - 1)
+      {
+        // ESP索引递增，准备存储下一个字节
+        esp_rx_index++;
+      }
+      else
+      {
+        // ESP缓冲区满，重置索引，避免溢出
+        // 这种情况下丢弃之前的数据，重新开始接收
+        esp_rx_index = 0;
+      }
+      
+      // 继续接收下一个字节（ESP模式）
+      // 注意：这里使用rx_buffer[0]作为临时存储，然后复制到esp_rx_buffer
+      HAL_UART_Receive_IT(&huart2, &rx_buffer[0], 1);
     }
-    // 检查缓冲区是否还有空间继续接收
-    else if(rx_index < RX_BUFFER_SIZE - 1)
-    {
-      rx_index++;  // 索引递增，准备接收下一个字符
-      // 继续接收下一个字节
-      HAL_UART_Receive_IT(&huart2, &rx_buffer[rx_index], 1);
-    }
+    // ==================== 用户命令模式处理 ====================
+    // 当esp_mode=0时，处于用户命令接收状态
+    // 此时接收用户通过串口输入的控制命令
     else
     {
-      // 缓冲区满，重置索引，避免溢出
-      // 这种情况下丢弃之前的数据，重新开始接收
-      rx_index = 0;
-      HAL_UART_Receive_IT(&huart2, &rx_buffer[rx_index], 1);
+      // 检查是否收到换行符或回车符，表示用户命令结束
+      if(rx_buffer[rx_index] == '\r' || rx_buffer[rx_index] == '\n')
+      {
+        // 只有当缓冲区有数据时才处理
+        if(rx_index > 0)
+        {
+          // 添加字符串结束符，使字符串处理函数能正确解析命令
+          rx_buffer[rx_index] = '\0';
+          // 设置接收完成标志，主循环中的Process_Received_Data()会处理这个命令
+          rx_complete = 1;
+          // 注意：不在此处重启接收，由Process_Received_Data()处理完后重启
+          // 这样可以确保命令处理完成后再准备接收下一个命令
+        }
+        else
+        {
+          // 收到空行（只有回车/换行），直接丢弃，继续接收下一个字节
+          HAL_UART_Receive_IT(&huart2, &rx_buffer[rx_index], 1);
+        }
+      }
+      // 检查缓冲区是否还有空间继续接收
+      else if(rx_index < RX_BUFFER_SIZE - 1)
+      {
+        // 索引递增，准备接收下一个字符
+        rx_index++;
+        // 继续接收下一个字节
+        HAL_UART_Receive_IT(&huart2, &rx_buffer[rx_index], 1);
+      }
+      else
+      {
+        // 缓冲区满，重置索引，避免溢出
+        // 这种情况下丢弃之前的数据，重新开始接收
+        rx_index = 0;
+        HAL_UART_Receive_IT(&huart2, &rx_buffer[rx_index], 1);
+      }
     }
   }
 }
