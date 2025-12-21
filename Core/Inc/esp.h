@@ -65,6 +65,15 @@ typedef struct {
 uint8_t ESP_Init(void);
 
 /**
+  * @brief 检查WiFi自动连接状态
+  * @param None
+  * @retval ESP_OK: 已连接, ESP_ERROR: 未连接
+  * @details 通电后检查ESP是否自动连接到WiFi，
+  *          如果未连接，会尝试设置为Station模式
+  */
+uint8_t ESP_CheckAutoConnect(void);
+
+/**
   * @brief 连接WiFi网络
   * @param ssid: WiFi名称
   * @param password: WiFi密码

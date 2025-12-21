@@ -35,6 +35,7 @@
 
 /* 外部变量声明 */
 extern UART_HandleTypeDef huart2;  // USART2句柄
+extern void USART2_SendString(char *str);  // 串口发送函数
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
@@ -155,6 +156,87 @@ uint8_t ESP_Init(void)
 }
 
 /**
+  * @brief 检查WiFi自动连接状态
+  * @param None
+  * @retval ESP_OK: 已连接, ESP_ERROR: 未连接
+  * @details 通电后检查ESP是否自动连接到WiFi，
+  *          如果未连接，会尝试设置为Station模式
+  */
+uint8_t ESP_CheckAutoConnect(void)
+{
+  uint8_t retry = 0;
+  
+  /* 等待1秒，给ESP模块上电稳定时间 */
+  ESP_DELAY(1000);
+  
+  /* 步骤1: 测试模块是否响应并关闭回显 */
+  for(retry = 0; retry < 3; retry++)
+  {
+    ESP_SendATCommand("ATE0\r\n", 1000);
+    if(ESP_WaitForResponse("OK", 1000))
+    {
+      break;
+    }
+    ESP_DELAY(500);
+  }
+  
+  if(retry >= 3)
+  {
+    /* 回显关闭失败，尝试普通AT命令 */
+    for(retry = 0; retry < 3; retry++)
+    {
+      ESP_SendATCommand("AT\r\n", 1000);
+      if(ESP_WaitForResponse("OK", 1000))
+      {
+        break;
+      }
+      ESP_DELAY(500);
+    }
+    
+    if(retry >= 3)
+    {
+      return ESP_ERROR;  // 模块无响应
+    }
+    
+    /* 再次尝试关闭回显 */
+    ESP_SendATCommand("ATE0\r\n", 1000);
+    ESP_WaitForResponse("OK", 1000);
+  }
+  
+  /* 步骤2: 检查WiFi连接状态 */
+  ESP_SendATCommand("AT+CIPSTA?\r\n", 1000);
+  
+  /* 等待响应 */
+  if(ESP_WaitForResponse("+CIPSTA:ip:", 2000))
+  {
+    /* 有IP地址，说明已连接WiFi */
+    ESP_ParseIP();  // 解析IP地址
+    esp_status.connected = 1;
+    return ESP_OK;
+  }
+  
+  /* 步骤3: 如果未连接，设置为Station模式 */
+  ESP_SendATCommand("AT+CWMODE=1\r\n", 1000);
+  if(!ESP_WaitForResponse("OK", 1000))
+  {
+    return ESP_ERROR;
+  }
+  
+  /* 步骤4: 再次检查WiFi状态 */
+  ESP_SendATCommand("AT+CIPSTA?\r\n", 1000);
+  if(ESP_WaitForResponse("+CIPSTA:ip:", 2000))
+  {
+    ESP_ParseIP();
+    esp_status.connected = 1;
+    return ESP_OK;
+  }
+  
+  /* 未连接WiFi */
+  esp_status.connected = 0;
+  return ESP_ERROR;
+}
+
+/**
   * @brief 连接WiFi网络
   * @param ssid: WiFi名称
   * @param password: WiFi密码
@@ -164,29 +246,106 @@ uint8_t ESP_Init(void)
 uint8_t ESP_ConnectWiFi(const char *ssid, const char *password)
 {
   char cmd[128];
+  char debug_msg[ESP_RX_BUFFER_SIZE + 32];
   
   /* 构建连接指令 */
   snprintf(cmd, sizeof(cmd), "AT+CWJAP=\"%s\",\"%s\"\r\n", ssid, password);
   
   /* 发送连接指令 */
-  ESP_SendATCommand(cmd, 10000);  // WiFi连接需要较长时间
+  USART2_SendString("Connecting to WiFi (this may take up to 30 seconds)...\r\n");
+  ESP_SendATCommand(cmd, 1000);
   
-  /* 等待连接结果 */
-  if(ESP_WaitForResponse("WIFI CONNECTED", 10000))
+  /* 等待连接结果 - WiFi连接可能需要15-30秒 */
+  /* ESP可能返回多种响应：WIFI CONNECTED, WIFI GOT IP, OK, 或者 ERROR */
+  uint32_t start_time = HAL_GetTick();
+  uint8_t got_wifi_connected = 0;
+  uint8_t got_wifi_got_ip = 0;
+  uint8_t got_ok = 0;
+  uint8_t got_error_only = 0;
+  
+  /* 最多等待30秒 */
+  while(HAL_GetTick() - start_time < 30000)
   {
-    ESP_WaitForResponse("WIFI GOT IP", 5000);
-    
-    /* 获取IP地址 */
-    ESP_SendATCommand("AT+CIPSTA?\r\n", 1000);
-    if(ESP_WaitForResponse("OK", 1000))
+    if(esp_response_ready)
     {
-      ESP_ParseIP();
+      /* 显示接收到的响应 */
+      snprintf(debug_msg, sizeof(debug_msg), "[WiFi]: %s\r\n", esp_rx_buffer);
+      USART2_SendString(debug_msg);
+      
+      /* 检查是否收到WIFI CONNECTED */
+      if(strstr((char*)esp_rx_buffer, "WIFI CONNECTED") != NULL)
+      {
+        got_wifi_connected = 1;
+        USART2_SendString("WiFi connected, waiting for IP...\r\n");
+      }
+      
+      /* 检查是否收到WIFI GOT IP */
+      if(strstr((char*)esp_rx_buffer, "WIFI GOT IP") != NULL || 
+         strstr((char*)esp_rx_buffer, "GOT IP") != NULL)
+      {
+        got_wifi_got_ip = 1;
+        USART2_SendString("Got IP address!\r\n");
+      }
+      
+      /* 检查是否收到OK */
+      if(strstr((char*)esp_rx_buffer, "OK") != NULL)
+      {
+        got_ok = 1;
+      }
+      
+      /* 检查是否收到FAIL（真正的失败） */
+      if(strstr((char*)esp_rx_buffer, "FAIL") != NULL)
+      {
+        USART2_SendString("Connection failed (FAIL received)!\r\n");
+        return ESP_ERROR;
+      }
+      
+      /* 如果收到ERROR但没有其他成功标志，可能是真正的错误 */
+      if(strstr((char*)esp_rx_buffer, "ERROR") != NULL)
+      {
+        if(!got_wifi_connected && !got_wifi_got_ip && !got_ok)
+        {
+          got_error_only = 1;
+        }
+      }
+      
+      /* 连接成功的判断条件：收到OK，并且之前收到了WIFI CONNECTED或GOT IP */
+      if(got_ok && (got_wifi_connected || got_wifi_got_ip))
+      {
+        /* 连接成功，获取IP地址 */
+        ESP_DELAY(500);
+        ESP_SendATCommand("AT+CIPSTA?\r\n", 1000);
+        if(ESP_WaitForResponse("+CIPSTA:ip:", 2000))
+        {
+          ESP_ParseIP();
+        }
+        
+        esp_status.connected = 1;
+        USART2_SendString("WiFi connection successful!\r\n");
+        return ESP_OK;
+      }
+      
+      esp_response_ready = 0;
     }
-    
-    esp_status.connected = 1;
-    return ESP_OK;
+    ESP_DELAY(100);
   }
   
+  /* 超时检查 */
+  if(got_wifi_connected || got_wifi_got_ip)
+  {
+    /* 虽然超时了，但收到了连接成功的消息，可能是最后的OK丢失了 */
+    USART2_SendString("WiFi seems connected (timeout on final OK)\r\n");
+    ESP_DELAY(500);
+    ESP_SendATCommand("AT+CIPSTA?\r\n", 1000);
+    if(ESP_WaitForResponse("+CIPSTA:ip:", 2000))
+    {
+      ESP_ParseIP();
+      esp_status.connected = 1;
+      return ESP_OK;
+    }
+  }
+  
+  USART2_SendString("Connection timeout or failed!\r\n");
   return ESP_ERROR;
 }
 
@@ -291,11 +450,16 @@ void ESP_SendATCommand(const char *cmd, uint32_t timeout)
 uint8_t ESP_WaitForResponse(const char *expected, uint32_t timeout)
 {
   uint32_t start_time = HAL_GetTick();
+  char debug_msg[ESP_RX_BUFFER_SIZE + 32];
   
   while(HAL_GetTick() - start_time < timeout)
   {
     if(esp_response_ready)
     {
+      /* 调试输出：显示接收到的数据 */
+      snprintf(debug_msg, sizeof(debug_msg), "[ESP RX]: %s\r\n", esp_rx_buffer);
+      USART2_SendString(debug_msg);
+      
       /* 检查是否包含期望的响应 */
       if(strstr((char*)esp_rx_buffer, expected) != NULL)
       {
@@ -313,6 +477,10 @@ uint8_t ESP_WaitForResponse(const char *expected, uint32_t timeout)
     }
     ESP_DELAY(10);
   }
+  
+  /* 超时调试信息 */
+  snprintf(debug_msg, sizeof(debug_msg), "[ESP]: Timeout waiting for '%s'\r\n", expected);
+  USART2_SendString(debug_msg);
   
   return 0;  // 超时
 }
