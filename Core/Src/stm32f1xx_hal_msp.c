@@ -93,7 +93,39 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
   
-  if(huart->Instance == USART2)
+  if(huart->Instance == USART1)
+  {
+    /* USER CODE BEGIN USART1_MspInit 0 */
+    
+    /* USER CODE END USART1_MspInit 0 */
+    
+    /* Peripheral clock enable */
+    __HAL_RCC_USART1_CLK_ENABLE();  // 使能USART1时钟
+    
+    /* USART1 GPIO Configuration    
+    PA9     ------> USART1_TX
+    PA10    ------> USART1_RX
+    */
+    __HAL_RCC_GPIOA_CLK_ENABLE();   // 使能GPIOA时钟（如果还没有使能）
+    
+    /* 配置USART1_TX引脚 (PA9) */
+    GPIO_InitStruct.Pin = GPIO_PIN_9;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;          // 复用推挽输出
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;    // 高速模式
+    GPIO_InitStruct.Pull = GPIO_NOPULL;              // 无上下拉
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    
+    /* 配置USART1_RX引脚 (PA10) */
+    GPIO_InitStruct.Pin = GPIO_PIN_10;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_INPUT;       // 复用输入模式
+    GPIO_InitStruct.Pull = GPIO_NOPULL;              // 无上下拉
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    
+    /* USER CODE BEGIN USART1_MspInit 1 */
+    
+    /* USER CODE END USART1_MspInit 1 */
+  }
+  else if(huart->Instance == USART2)
   {
     /* USER CODE BEGIN USART2_MspInit 0 */
     
@@ -139,7 +171,26 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart)
   */
 void HAL_UART_MspDeInit(UART_HandleTypeDef *huart)
 {
-  if(huart->Instance == USART2)
+  if(huart->Instance == USART1)
+  {
+    /* USER CODE BEGIN USART1_MspDeInit 0 */
+    
+    /* USER CODE END USART1_MspDeInit 0 */
+    
+    /* Peripheral clock disable */
+    __HAL_RCC_USART1_CLK_DISABLE();  // 禁用USART1时钟
+    
+    /* USART1 GPIO Configuration    
+    PA9     ------> USART1_TX
+    PA10    ------> USART1_RX
+    */
+    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_9 | GPIO_PIN_10);  // 复位GPIO引脚
+    
+    /* USER CODE BEGIN USART1_MspDeInit 1 */
+    
+    /* USER CODE END USART1_MspDeInit 1 */
+  }
+  else if(huart->Instance == USART2)
   {
     /* USER CODE BEGIN USART2_MspDeInit 0 */
     

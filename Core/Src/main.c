@@ -69,6 +69,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* 私有变量 */
+UART_HandleTypeDef huart1;  // USART1句柄，用于调试输出（PA9/PA10，115200）
 UART_HandleTypeDef huart2;  // USART2句柄，用于管理串口2的所有操作
 
 /* USER CODE BEGIN PV */
@@ -90,16 +91,19 @@ extern uint8_t esp_rx_buffer[512];  // ESP接收缓冲区，用于存储ESP模�
 extern uint8_t esp_rx_complete;     // ESP接收完成标志，当收到换行符时置1
 extern uint16_t esp_rx_index;       // ESP接收索引，指示当前ESP数据在缓冲区中的位置
 extern uint8_t esp_response_ready;  // ESP响应就绪标志，表示ESP数据已准备好供驱动层处理
+extern uint32_t esp_last_rx_time;   // ESP最后接收时间戳
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);  // 系统时钟配置函数声明
 static void MX_GPIO_Init(void); // GPIO初始化函数声明（静态函数，仅在本文件内可见）
+static void MX_USART1_UART_Init(void); // USART1初始化函数声明（调试串口）
 static void MX_USART2_UART_Init(void); // USART2初始化函数声明
 
 /* USER CODE BEGIN PFP */
 /* 用户代码开始：私有函数原型 */
 int _write(int file, char *ptr, int len);  // 重定向printf函数原型，用于printf到串口
+void DEBUG_SendString(char *str);          // USART1调试串口发送函数原型
 void USART2_SendString(char *str);         // 串口发送字符串函数原型
 /* USER CODE END PFP */
 
@@ -142,6 +146,18 @@ void USART2_SendString(char *str)
   // strlen计算字符串长度（不包括结束符）
   // HAL_UART_Transmit使用阻塞模式发送
   HAL_UART_Transmit(&huart2, (uint8_t*)str, strlen(str), HAL_MAX_DELAY);
+}
+
+/**
+  * @brief USART1发送调试信息
+  * @param str: 要发送的调试字符串，以'\0'结尾
+  * @retval None
+  * @details USART1专用调试串口，配置在PA9(TX)/PA10(RX)
+  *          波特率115200，用于输出系统调试信息
+  */
+void DEBUG_SendString(char *str)
+{
+  HAL_UART_Transmit(&huart1, (uint8_t*)str, strlen(str), HAL_MAX_DELAY);
 }
 
 /**
@@ -281,66 +297,91 @@ int main(void)
   /* Initialize all configured peripherals */
   /* 初始化所有配置的外设 */
   MX_GPIO_Init();              // 初始化GPIO（LED引脚）
+  MX_USART1_UART_Init();       // 初始化USART1（调试串口）
   MX_USART2_UART_Init();       // 初始化USART2（串口）
   
   /* 用户代码开始：第2区 */
-  /* 发送启动信息，告知用户系统已启动 */
-  USART2_SendString("\r\n=== STM32 USART2 + ESP-01S Demo ===\r\n");
-  USART2_SendString("System initialized successfully!\r\n");
-  USART2_SendString("USART2: 115200 8N1, TX=PA2, RX=PA3\r\n");
-  
   /* 设置为ESP模式，避免触发用户命令处理逻辑 */
   esp_mode = 1;
+  
+  /* 发送调试信息到USART1（调试串口） */
+  DEBUG_SendString("\r\n=== STM32F103 Debug Port (USART1) ===\r\n");
+  DEBUG_SendString("Port: PA9(TX) / PA10(RX)\r\n");
+  DEBUG_SendString("Baud: 115200 8N1\r\n");
+  DEBUG_SendString("System starting...\r\n\r\n");
   
   /* 启动串口接收中断，用于接收ESP模块的响应 */
   HAL_UART_Receive_IT(&huart2, &rx_buffer[0], 1);
   
   /* 检查ESP WiFi自动连接状态 */
-  USART2_SendString("\r\nChecking ESP WiFi auto-connect...\r\n");
-  
-  /* 添加调试信息 */
-  USART2_SendString("Sending ATE0 to ESP...\r\n");
-  
   if(ESP_CheckAutoConnect() == ESP_OK)
   {
-    USART2_SendString("WiFi already connected!\r\n");
+    /* WiFi已连接，获取IP地址 */
     ESP_Status_t* status = ESP_GetStatus();
     if(strlen(status->ip_address) > 0)
     {
-      USART2_SendString("IP Address: ");
+      USART2_SendString("WiFi connected. IP: ");
       USART2_SendString(status->ip_address);
       USART2_SendString("\r\n");
+    }
+    else
+    {
+      /* 自动连接成功但没有IP地址，手动查询 */
+      USART2_SendString("WiFi connected but no IP found, querying...\r\n");
+      if(ESP_QueryIP() == ESP_OK)
+      {
+        ESP_Status_t* status = ESP_GetStatus();
+        USART2_SendString("WiFi connected. IP: ");
+        USART2_SendString(status->ip_address);
+        USART2_SendString("\r\n");
+      }
+      else
+      {
+        USART2_SendString("Could not retrieve IP address\r\n");
+      }
     }
   }
   else
   {
     /* WiFi未连接，尝试自动连接 */
-    USART2_SendString("WiFi not connected. Attempting to connect...\r\n");
-    USART2_SendString("SSID: ");
-    USART2_SendString(WIFI_SSID);
-    USART2_SendString("\r\n");
-    
-    /* 调用WiFi连接函数 */
     if(ESP_ConnectWiFi(WIFI_SSID, WIFI_PASSWORD) == ESP_OK)
     {
-      USART2_SendString("WiFi connected successfully!\r\n");
+      /* WiFi连接成功，获取IP地址 */
       ESP_Status_t* status = ESP_GetStatus();
       if(strlen(status->ip_address) > 0)
       {
-        USART2_SendString("IP Address: ");
+        USART2_SendString("WiFi connected. IP: ");
         USART2_SendString(status->ip_address);
         USART2_SendString("\r\n");
+      }
+      else
+      {
+        /* 连接成功但没有IP地址，手动查询 */
+        USART2_SendString("WiFi connected but no IP found, querying...\r\n");
+        if(ESP_QueryIP() == ESP_OK)
+        {
+          ESP_Status_t* status = ESP_GetStatus();
+          USART2_SendString("WiFi connected. IP: ");
+          USART2_SendString(status->ip_address);
+          USART2_SendString("\r\n");
+        }
+        else
+        {
+          USART2_SendString("Could not retrieve IP address\r\n");
+        }
       }
     }
     else
     {
-      USART2_SendString("WiFi connection failed!\r\n");
-      USART2_SendString("Please check:\r\n");
-      USART2_SendString("1. WiFi SSID and password are correct\r\n");
-      USART2_SendString("2. WiFi router is powered on\r\n");
-      USART2_SendString("3. ESP-01S is within WiFi range\r\n");
+      USART2_SendString("WiFi connection failed\r\n");
     }
   }
+  
+  /* 切换回用户命令模式 */
+  esp_mode = 0;
+  rx_index = 0;
+  rx_complete = 0;
+  HAL_UART_Receive_IT(&huart2, &rx_buffer[rx_index], 1);
   
   /* USER CODE END 2 */
 
@@ -350,6 +391,9 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
+    
+    /* 处理ESP接收到的数据 */
+    ESP_ProcessReceivedData();
     
     /* LED闪烁逻辑 */
     HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);  // 翻转LED引脚电平（亮/灭切换）
@@ -424,6 +468,52 @@ void SystemClock_Config(void)
   {
     Error_Handler();  // 如果配置失败，调用错误处理函数
   }
+}
+
+/**
+  * @brief USART1 Initialization Function USART1初始化函数
+  * @param None 无参数
+  * @retval None 无返回值
+  * @details 配置USART1调试串口参数：
+  *          - 波特率：115200
+  *          - 数据位：8位
+  *          - 停止位：1位
+  *          - 校验位：无
+  *          - 流控：无
+  *          - 模式：收发模式
+  *          - 引脚：TX=PA9, RX=PA10
+  * @note USART1挂载在APB2总线上，时钟频率为8MHz
+  *       专用于调试输出，不占用USART2（USART2用于ESP通信）
+  */
+static void MX_USART1_UART_Init(void)
+{
+  /* USER CODE BEGIN USART1_Init 0 */
+  /* 用户代码开始：USART1初始化第0区 */
+  /* USER CODE END USART1_Init 0 */
+
+  /* USER CODE BEGIN USART1_Init 1 */
+  /* 用户代码开始：USART1初始化第1区 */
+  /* USER CODE END USART1_Init 1 */
+
+  /* 配置USART1句柄参数 */
+  huart1.Instance = USART1;                      // USART1实例
+  huart1.Init.BaudRate = 115200;                 // 波特率：115200
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;   // 数据位：8位
+  huart1.Init.StopBits = UART_STOPBITS_1;        // 停止位：1位
+  huart1.Init.Parity = UART_PARITY_NONE;         // 校验位：无
+  huart1.Init.Mode = UART_MODE_TX_RX;            // 模式：收发模式
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;   // 硬件流控：无
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16; // 过采样：16倍
+  
+  /* 应用USART1配置 */
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();  // 如果初始化失败，调用错误处理函数
+  }
+  
+  /* USER CODE BEGIN USART1_Init 2 */
+  /* 用户代码开始：USART1初始化第2区 */
+  /* USER CODE END USART1_Init 2 */
 }
 
 /**
@@ -562,14 +652,14 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   // 检查是否是USART2的中断
   if(huart->Instance == USART2)
   {
-    // ==================== ESP数据模式处理 ====================
-    // 当esp_mode=1时，处于ESP模块数据接收状态
-    // 此时直接将接收到的数据传递给ESP驱动层处理
-    if(esp_mode)
-    {
-      // 将接收到的字节复制到ESP专用接收缓冲区
-      // rx_buffer[0]是当前接收到的字节（因为每次只接收1个字节）
-      
+      // ==================== ESP数据模式处理 ====================
+      // 当esp_mode=1时，处于ESP模块数据接收状态
+      // 此时直接将接收到的数据传递给ESP驱动层处理
+      if(esp_mode)
+      {
+        // 更新最后接收时间戳（用于超时检测）
+        esp_last_rx_time = HAL_GetTick();
+        
       // 检查是否收到换行符或回车符，表示ESP模块的一行响应结束
       if(rx_buffer[0] == '\r' || rx_buffer[0] == '\n')
       {
@@ -578,12 +668,15 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         {
           // 添加字符串结束符，使ESP驱动层能正确解析响应
           esp_rx_buffer[esp_rx_index] = '\0';
-          // 设置ESP接收完成标志，驱动层会在主循环中处理这个响应
+          // 设置ESP接收完成标志
           esp_rx_complete = 1;
-          // 设置ESP响应就绪标志，ESP_WaitForResponse会检查此标志
+          // 设置响应就绪标志，让等待函数能够立即处理
           esp_response_ready = 1;
+          
           // 重置ESP接收索引，为下一次接收做准备
           esp_rx_index = 0;
+          DEBUG_SendString("ESP Response Received: ");
+          DEBUG_SendString((char*)esp_rx_buffer);
         }
         // 如果esp_rx_index==0，说明是连续的换行符，直接忽略，不存储
       }
@@ -601,11 +694,10 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
           esp_rx_index = 0;
         }
       }
-      
-      // 继续接收下一个字节（ESP模式）
-      // 注意：这里使用rx_buffer[0]作为临时存储，然后复制到esp_rx_buffer
-      HAL_UART_Receive_IT(&huart2, &rx_buffer[0], 1);
-    }
+        
+        // 继续接收下一个字节（ESP模式）
+        HAL_UART_Receive_IT(&huart2, &rx_buffer[0], 1);
+      }
     // ==================== 用户命令模式处理 ====================
     // 当esp_mode=0时，处于用户命令接收状态
     // 此时接收用户通过串口输入的控制命令

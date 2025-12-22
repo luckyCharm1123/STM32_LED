@@ -132,6 +132,13 @@ uint8_t ESP_DisconnectWiFi(void);
   */
 uint8_t ESP_Restart(void);
 
+/**
+  * @brief 手动查询IP地址
+  * @param None
+  * @retval ESP_OK: 成功, ESP_ERROR: 失败
+  */
+uint8_t ESP_QueryIP(void);
+
 /* USER CODE END EFP */
 
 #ifdef __cplusplus

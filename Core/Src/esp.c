@@ -34,8 +34,11 @@
 #include <stdio.h>
 
 /* 外部变量声明 */
-extern UART_HandleTypeDef huart2;  // USART2句柄
+extern UART_HandleTypeDef huart1;  // USART1句柄（调试用）
+extern UART_HandleTypeDef huart2;  // USART2句柄（ESP通信用）
+extern void DEBUG_SendString(char *str);   // 调试串口发送函数
 extern void USART2_SendString(char *str);  // 串口发送函数
+extern uint8_t rx_buffer[128];  // 主串口接收缓冲区
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
@@ -71,6 +74,7 @@ uint16_t esp_rx_index = 0;                  // ESP接收索引
 uint8_t esp_rx_complete = 0;                // ESP接收完成标志
 uint8_t esp_response_ready = 0;             // ESP响应就绪标志
 uint32_t esp_timeout_counter = 0;           // 超时计数器
+uint32_t esp_last_rx_time = 0;              // 最后接收时间戳
 
 /* ESP模块状态 - 使用头文件中定义的结构体 */
 ESP_Status_t esp_status = {0};  // ESP状态结构体
@@ -166,15 +170,69 @@ uint8_t ESP_CheckAutoConnect(void)
 {
   uint8_t retry = 0;
   
+  DEBUG_SendString("\r\n=== ESP Auto-Connect Check ===\r\n");
+  DEBUG_SendString("Waiting 1 second for ESP module to stabilize...\r\n");
+  
   /* 等待1秒，给ESP模块上电稳定时间 */
   ESP_DELAY(1000);
   
   /* 步骤1: 测试模块是否响应并关闭回显 */
+  DEBUG_SendString("Step 1: Testing ESP module response (ATE0)...\r\n");
+  DEBUG_SendString("  Note: ESP-01S needs 3.3V power and 1-2 seconds to boot\r\n");
+  DEBUG_SendString("  Connections: STM32 PA2(ESP RX) <-> PA3(ESP TX)\r\n");
+  
+  /* 首次发送AT指令，给ESP更多时间响应 */
+  DEBUG_SendString("  Sending AT command (first attempt, 5s timeout)...\r\n");
+  ESP_SendATCommand("AT\r\n", 1000);
+  
+  /* 等待更长时间，让ESP有足够时间启动 */
+  uint32_t first_wait = HAL_GetTick();
+  uint8_t first_response = 0;
+  
+  while(HAL_GetTick() - first_wait < 5000)
+  {
+    if(esp_response_ready)
+    {
+      first_response = 1;
+      char debug_msg[ESP_RX_BUFFER_SIZE + 32];
+      int esp_len = strlen((char*)esp_rx_buffer);
+      if(esp_len > 100) {
+        snprintf(debug_msg, sizeof(debug_msg), "  [ESP] %.100s...\r\n", esp_rx_buffer);
+      } else {
+        snprintf(debug_msg, sizeof(debug_msg), "  [ESP] %s\r\n", esp_rx_buffer);
+      }
+      DEBUG_SendString(debug_msg);
+      
+      if(strstr((char*)esp_rx_buffer, "OK") != NULL)
+      {
+        DEBUG_SendString("[OK] ESP module is responding!\r\n");
+        break;
+      }
+      esp_response_ready = 0;
+    }
+    ESP_DELAY(10);
+  }
+  
+  if(!first_response)
+  {
+    DEBUG_SendString("[ERROR] No response from ESP module\r\n");
+    DEBUG_SendString("  Troubleshooting:\r\n");
+    DEBUG_SendString("  1. Check power supply (3.3V, 500mA minimum)\r\n");
+    DEBUG_SendString("  2. Verify TX/RX connections (not reversed)\r\n");
+    DEBUG_SendString("  3. Ensure GND is connected\r\n");
+    DEBUG_SendString("  4. Wait 3 seconds after power-on\r\n");
+    DEBUG_SendString("  5. Check if GPIO0 is floating (not grounded)\r\n");
+    return ESP_ERROR;
+  }
+  
+  /* 尝试关闭回显 */
+  DEBUG_SendString("Step 1b: Disabling echo (ATE0)...\r\n");
   for(retry = 0; retry < 3; retry++)
   {
     ESP_SendATCommand("ATE0\r\n", 1000);
     if(ESP_WaitForResponse("OK", 1000))
     {
+      DEBUG_SendString("[OK] Echo disabled successfully\r\n");
       break;
     }
     ESP_DELAY(500);
@@ -182,7 +240,8 @@ uint8_t ESP_CheckAutoConnect(void)
   
   if(retry >= 3)
   {
-    /* 回显关闭失败，尝试普通AT命令 */
+    /* 回显关闭失败，继续尝试普通AT命令 */
+    DEBUG_SendString("[WARNING] Could not disable echo, continuing...\r\n");
     for(retry = 0; retry < 3; retry++)
     {
       ESP_SendATCommand("AT\r\n", 1000);
@@ -195,43 +254,156 @@ uint8_t ESP_CheckAutoConnect(void)
     
     if(retry >= 3)
     {
-      return ESP_ERROR;  // 模块无响应
+      /* 尝试重启ESP模块 */
+      DEBUG_SendString("ESP not responding, attempting restart...\r\n");
+      ESP_SendATCommand("AT+RST\r\n", 1000);
+      ESP_DELAY(3000);  // 等待重启完成
+      
+      /* 重启后再次尝试 */
+      for(retry = 0; retry < 3; retry++)
+      {
+        ESP_SendATCommand("ATE0\r\n", 1000);
+        if(ESP_WaitForResponse("OK", 1000))
+        {
+          break;
+        }
+        ESP_DELAY(500);
+      }
+      
+      if(retry >= 3)
+      {
+        return ESP_ERROR;  // 模块无响应
+      }
     }
-    
-    /* 再次尝试关闭回显 */
-    ESP_SendATCommand("ATE0\r\n", 1000);
-    ESP_WaitForResponse("OK", 1000);
   }
   
-  /* 步骤2: 检查WiFi连接状态 */
-  ESP_SendATCommand("AT+CIPSTA?\r\n", 1000);
+  /* 步骤2: 检查WiFi连接状态 - 使用AT+CIPSTATUS指令 */
+  DEBUG_SendString("Step 2: Checking WiFi connection status...\r\n");
+  ESP_SendATCommand("AT+CIPSTATUS\r\n", 1000);
   
-  /* 等待响应 */
-  if(ESP_WaitForResponse("+CIPSTA:ip:", 2000))
+  /* 等待响应 - AT+CIPSTATUS返回连接状态信息 */
+  uint32_t start_time = HAL_GetTick();
+  uint8_t wifi_connected = 0;
+  uint8_t got_status = 0;
+  
+  while(HAL_GetTick() - start_time < 3000)
   {
-    /* 有IP地址，说明已连接WiFi */
-    ESP_ParseIP();  // 解析IP地址
+    if(esp_response_ready)
+    {
+      /* 检查连接状态 */
+      if(strstr((char*)esp_rx_buffer, "STATUS:2") != NULL || 
+         strstr((char*)esp_rx_buffer, "STATUS:3") != NULL)
+      {
+        wifi_connected = 1;
+        got_status = 1;
+        DEBUG_SendString("[OK] WiFi is connected\r\n");
+      }
+      else if(strstr((char*)esp_rx_buffer, "STATUS:5") != NULL)
+      {
+        wifi_connected = 0;
+        got_status = 1;
+        DEBUG_SendString("[INFO] WiFi is not connected\r\n");
+      }
+      
+      /* 检查是否收到OK（表示指令完成） */
+      if(strstr((char*)esp_rx_buffer, "OK") != NULL)
+      {
+        /* 如果WiFi已连接，直接返回成功，跳过Step 3和Step 4 */
+        if(wifi_connected && got_status)
+        {
+          DEBUG_SendString("=== Auto-Connect Check Complete ===\r\n\r\n");
+          esp_status.connected = 1;
+          esp_response_ready = 0;
+          return ESP_OK;  /* 直接返回，不再执行后续步骤 */
+        }
+        
+        /* 如果收到了OK但没有STATUS信息，继续等待 */
+        if(!got_status)
+        {
+          esp_response_ready = 0;
+          continue;
+        }
+        
+        /* WiFi未连接，退出循环继续后续配置步骤 */
+        esp_response_ready = 0;
+        break;
+      }
+      
+      /* 重置标志继续等待 */
+      esp_response_ready = 0;
+    }
+    ESP_DELAY(10);
+  }
+  
+  /* 检查是否在循环外检测到WiFi连接（STATUS和OK分两行的情况） */
+  if(wifi_connected && got_status)
+  {
+    DEBUG_SendString("=== Auto-Connect Check Complete ===\r\n\r\n");
     esp_status.connected = 1;
     return ESP_OK;
   }
   
   /* 步骤3: 如果未连接，设置为Station模式 */
+  DEBUG_SendString("Step 3: Setting WiFi mode to Station (AT+CWMODE=1)...\r\n");
   ESP_SendATCommand("AT+CWMODE=1\r\n", 1000);
   if(!ESP_WaitForResponse("OK", 1000))
   {
+    DEBUG_SendString("[ERROR] Failed to set WiFi mode\r\n\r\n");
     return ESP_ERROR;
   }
+  DEBUG_SendString("[OK] WiFi mode set to Station\r\n");
   
   /* 步骤4: 再次检查WiFi状态 */
-  ESP_SendATCommand("AT+CIPSTA?\r\n", 1000);
-  if(ESP_WaitForResponse("+CIPSTA:ip:", 2000))
+  DEBUG_SendString("Step 4: Re-checking WiFi status...\r\n");
+  ESP_SendATCommand("AT+CIPSTATUS\r\n", 1000);
+  
+  /* 等待响应 - 需要等待完整的响应 */
+  start_time = HAL_GetTick();
+  uint8_t status_wifi_connected = 0;
+  
+  while(HAL_GetTick() - start_time < 3000)
   {
-    ESP_ParseIP();
-    esp_status.connected = 1;
-    return ESP_OK;
+    if(esp_response_ready)
+    {
+      /* 检查连接状态 */
+      if(strstr((char*)esp_rx_buffer, "STATUS:2") != NULL || 
+         strstr((char*)esp_rx_buffer, "STATUS:3") != NULL)
+      {
+        status_wifi_connected = 1;
+        DEBUG_SendString("[OK] WiFi connected\r\n");
+      }
+      else if(strstr((char*)esp_rx_buffer, "STATUS:5") != NULL)
+      {
+        status_wifi_connected = 0;
+        DEBUG_SendString("[INFO] WiFi not connected\r\n");
+      }
+      
+      /* 检查是否收到OK（表示指令完成） */
+      if(strstr((char*)esp_rx_buffer, "OK") != NULL)
+      {
+        esp_response_ready = 0;
+        /* 如果找到了WiFi连接状态，说明已连接WiFi */
+        if(status_wifi_connected)
+        {
+          DEBUG_SendString("=== Auto-Connect Check Complete ===\r\n\r\n");
+          esp_status.connected = 1;
+          return ESP_OK;
+        }
+        else
+        {
+          break;
+        }
+      }
+      
+      /* 重置标志继续等待 */
+      esp_response_ready = 0;
+    }
+    ESP_DELAY(10);
   }
   
   /* 未连接WiFi */
+  DEBUG_SendString("[INFO] No active WiFi connection found\r\n");
+  DEBUG_SendString("=== Auto-Connect Check Complete ===\r\n\r\n");
   esp_status.connected = 0;
   return ESP_ERROR;
 }
@@ -246,13 +418,17 @@ uint8_t ESP_CheckAutoConnect(void)
 uint8_t ESP_ConnectWiFi(const char *ssid, const char *password)
 {
   char cmd[128];
-  char debug_msg[ESP_RX_BUFFER_SIZE + 32];
   
   /* 构建连接指令 */
   snprintf(cmd, sizeof(cmd), "AT+CWJAP=\"%s\",\"%s\"\r\n", ssid, password);
   
   /* 发送连接指令 */
-  USART2_SendString("Connecting to WiFi (this may take up to 30 seconds)...\r\n");
+  char debug_msg[128];
+  DEBUG_SendString("\r\n=== WiFi Connection Process ===\r\n");
+  snprintf(debug_msg, sizeof(debug_msg), "SSID: %s\r\n", ssid);
+  DEBUG_SendString(debug_msg);
+  DEBUG_SendString("Sending AT+CWJAP command...\r\n");
+  DEBUG_SendString("Waiting for response (up to 30 seconds)...\r\n");
   ESP_SendATCommand(cmd, 1000);
   
   /* 等待连接结果 - WiFi连接可能需要15-30秒 */
@@ -261,22 +437,17 @@ uint8_t ESP_ConnectWiFi(const char *ssid, const char *password)
   uint8_t got_wifi_connected = 0;
   uint8_t got_wifi_got_ip = 0;
   uint8_t got_ok = 0;
-  uint8_t got_error_only = 0;
   
   /* 最多等待30秒 */
   while(HAL_GetTick() - start_time < 30000)
   {
     if(esp_response_ready)
     {
-      /* 显示接收到的响应 */
-      snprintf(debug_msg, sizeof(debug_msg), "[WiFi]: %s\r\n", esp_rx_buffer);
-      USART2_SendString(debug_msg);
-      
       /* 检查是否收到WIFI CONNECTED */
       if(strstr((char*)esp_rx_buffer, "WIFI CONNECTED") != NULL)
       {
         got_wifi_connected = 1;
-        USART2_SendString("WiFi connected, waiting for IP...\r\n");
+        DEBUG_SendString("[Stage 1/3] WIFI CONNECTED - WiFi association successful\r\n");
       }
       
       /* 检查是否收到WIFI GOT IP */
@@ -284,19 +455,20 @@ uint8_t ESP_ConnectWiFi(const char *ssid, const char *password)
          strstr((char*)esp_rx_buffer, "GOT IP") != NULL)
       {
         got_wifi_got_ip = 1;
-        USART2_SendString("Got IP address!\r\n");
+        DEBUG_SendString("[Stage 2/3] WIFI GOT IP - DHCP IP address obtained\r\n");
       }
       
       /* 检查是否收到OK */
       if(strstr((char*)esp_rx_buffer, "OK") != NULL)
       {
         got_ok = 1;
+        DEBUG_SendString("[Stage 3/3] OK - Connection command completed\r\n");
       }
       
       /* 检查是否收到FAIL（真正的失败） */
       if(strstr((char*)esp_rx_buffer, "FAIL") != NULL)
       {
-        USART2_SendString("Connection failed (FAIL received)!\r\n");
+        DEBUG_SendString("[ERROR] Connection FAILED - Check SSID/Password\r\n");
         return ESP_ERROR;
       }
       
@@ -305,7 +477,12 @@ uint8_t ESP_ConnectWiFi(const char *ssid, const char *password)
       {
         if(!got_wifi_connected && !got_wifi_got_ip && !got_ok)
         {
-          got_error_only = 1;
+          DEBUG_SendString("[ERROR] Connection error (no success indicators)\r\n");
+          return ESP_ERROR;
+        }
+        else
+        {
+          DEBUG_SendString("[WARNING] Received ERROR but connection may succeed\r\n");
         }
       }
       
@@ -313,15 +490,74 @@ uint8_t ESP_ConnectWiFi(const char *ssid, const char *password)
       if(got_ok && (got_wifi_connected || got_wifi_got_ip))
       {
         /* 连接成功，获取IP地址 */
-        ESP_DELAY(500);
-        ESP_SendATCommand("AT+CIPSTA?\r\n", 1000);
-        if(ESP_WaitForResponse("+CIPSTA:ip:", 2000))
+        DEBUG_SendString("\r\n*** WiFi Connection Successful! ***\r\n");
+        DEBUG_SendString("Waiting for DHCP to complete...\r\n");
+        ESP_DELAY(2000);  /* 等待2秒让DHCP完全完成 */
+        
+        DEBUG_SendString("Querying IP address (AT+CIFSR)...\r\n");
+        ESP_SendATCommand("AT+CIFSR\r\n", 1000);
+        
+        /* 等待并打印AT+CIFSR的响应 */
+        uint32_t ip_start_time = HAL_GetTick();
+        uint8_t got_ip_info = 0;
+        uint8_t response_count = 0;  /* 响应行计数 */
+        char debug_msg[ESP_RX_BUFFER_SIZE + 32];  /* 声明debug_msg缓冲区 */
+        
+        while(HAL_GetTick() - ip_start_time < 3000)  /* 增加超时到3秒 */
         {
-          ESP_ParseIP();
+          if(esp_response_ready)
+          {
+            response_count++;
+            /* 打印ESP原始响应 - 限制长度避免缓冲区溢出 */
+            int esp_len = strlen((char*)esp_rx_buffer);
+            if(esp_len > 100) {
+              snprintf(debug_msg, sizeof(debug_msg), "  [ESP #%d] %.100s...\r\n", response_count, esp_rx_buffer);
+            } else {
+              snprintf(debug_msg, sizeof(debug_msg), "  [ESP #%d] %s\r\n", response_count, esp_rx_buffer);
+            }
+            DEBUG_SendString(debug_msg);
+            
+            /* 检查IP地址 - AT+CIFSR返回+CIFSR:STAIP或+CIFSR:APIP */
+            if(strstr((char*)esp_rx_buffer, "+CIFSR:STAIP") != NULL ||
+               strstr((char*)esp_rx_buffer, "STAIP,") != NULL)
+            {
+              ESP_ParseIP();
+              snprintf(debug_msg, sizeof(debug_msg), "IP Address: %s\r\n", 
+                       esp_status.ip_address);
+              DEBUG_SendString(debug_msg);
+              got_ip_info = 1;
+            }
+            
+        /* 检查OK，但不要立即退出，继续等待可能的其他行 */
+        if(strstr((char*)esp_rx_buffer, "OK") != NULL)
+        {
+          /* 如果已经收到IP信息和OK，可以退出了 */
+          if(got_ip_info)
+          {
+            esp_response_ready = 0;
+            break;
+          }
+          /* 注意：ESP可能先发送OK，然后才发送IP信息，所以不要提前退出 */
+        }
+            
+            esp_response_ready = 0;
+          }
+          
+          ESP_DELAY(10);
         }
         
+        /* 打印统计信息 */
+        snprintf(debug_msg, sizeof(debug_msg), "[INFO] Received %d response lines in %lu ms\r\n", 
+                 response_count, HAL_GetTick() - ip_start_time);
+        DEBUG_SendString(debug_msg);
+        
+        if(!got_ip_info)
+        {
+          DEBUG_SendString("[WARNING] Could not retrieve IP address from AT+CIPSTA?\r\n");
+        }
+        DEBUG_SendString("=== Connection Complete ===\r\n\r\n");
+        
         esp_status.connected = 1;
-        USART2_SendString("WiFi connection successful!\r\n");
         return ESP_OK;
       }
       
@@ -331,21 +567,86 @@ uint8_t ESP_ConnectWiFi(const char *ssid, const char *password)
   }
   
   /* 超时检查 */
+  DEBUG_SendString("\r\n[TIMEOUT] 30 seconds elapsed\r\n");
   if(got_wifi_connected || got_wifi_got_ip)
   {
     /* 虽然超时了，但收到了连接成功的消息，可能是最后的OK丢失了 */
-    USART2_SendString("WiFi seems connected (timeout on final OK)\r\n");
-    ESP_DELAY(500);
-    ESP_SendATCommand("AT+CIPSTA?\r\n", 1000);
-    if(ESP_WaitForResponse("+CIPSTA:ip:", 2000))
+    DEBUG_SendString("[INFO] Connection indicators received, verifying...\r\n");
+    DEBUG_SendString("Waiting for DHCP to complete...\r\n");
+    ESP_DELAY(2000);  /* 等待2秒让DHCP完全完成 */
+    
+    DEBUG_SendString("Querying IP address (AT+CIFSR)...\r\n");
+    ESP_SendATCommand("AT+CIFSR\r\n", 1000);
+    
+    /* 等待并打印AT+CIFSR的响应 */
+    uint32_t ip_start_time = HAL_GetTick();
+    uint8_t got_ip_verify = 0;
+    uint8_t response_count = 0;
+    char debug_msg[ESP_RX_BUFFER_SIZE + 32];  /* 声明debug_msg缓冲区 */
+    
+    while(HAL_GetTick() - ip_start_time < 3000)
     {
-      ESP_ParseIP();
-      esp_status.connected = 1;
+      if(esp_response_ready)
+      {
+        response_count++;
+        /* 打印ESP原始响应 - 限制长度避免缓冲区溢出 */
+        int esp_len = strlen((char*)esp_rx_buffer);
+        if(esp_len > 100) {
+          snprintf(debug_msg, sizeof(debug_msg), "  [ESP #%d] %.100s...\r\n", response_count, esp_rx_buffer);
+        } else {
+          snprintf(debug_msg, sizeof(debug_msg), "  [ESP #%d] %s\r\n", response_count, esp_rx_buffer);
+        }
+        DEBUG_SendString(debug_msg);
+        
+        /* 检查IP地址 - AT+CIFSR返回+CIFSR:STAIP或+CIFSR:APIP */
+        if(strstr((char*)esp_rx_buffer, "+CIFSR:STAIP") != NULL ||
+           strstr((char*)esp_rx_buffer, "STAIP,") != NULL)
+        {
+          ESP_ParseIP();
+          snprintf(debug_msg, sizeof(debug_msg), "IP Address: %s\r\n", 
+                   esp_status.ip_address);
+          DEBUG_SendString(debug_msg);
+          DEBUG_SendString("*** Connection verified! ***\r\n\r\n");
+          esp_status.connected = 1;
+          got_ip_verify = 1;
+        }
+        
+        /* 检查OK，但不要立即退出 */
+        if(strstr((char*)esp_rx_buffer, "OK") != NULL)
+        {
+          /* 如果已经收到IP信息和OK，可以退出了 */
+          if(got_ip_verify)
+          {
+            esp_response_ready = 0;
+            break;
+          }
+          /* 注意：ESP可能先发送OK，然后才发送IP信息，所以不要提前退出 */
+        }
+        
+        esp_response_ready = 0;
+      }
+      
+      ESP_DELAY(10);
+    }
+    
+    /* 打印统计信息 */
+    snprintf(debug_msg, sizeof(debug_msg), "[INFO] Verify: Received %d response lines\r\n", response_count);
+    DEBUG_SendString(debug_msg);
+    
+    if(got_ip_verify)
+    {
       return ESP_OK;
     }
+    DEBUG_SendString("[ERROR] Could not verify connection\r\n\r\n");
+  }
+  else
+  {
+    DEBUG_SendString("[ERROR] No connection indicators received\r\n");
+    snprintf(debug_msg, sizeof(debug_msg), "Status - Connected: %d, GotIP: %d, OK: %d\r\n\r\n", 
+             got_wifi_connected, got_wifi_got_ip, got_ok);
+    DEBUG_SendString(debug_msg);
   }
   
-  USART2_SendString("Connection timeout or failed!\r\n");
   return ESP_ERROR;
 }
 
@@ -450,51 +751,95 @@ void ESP_SendATCommand(const char *cmd, uint32_t timeout)
 uint8_t ESP_WaitForResponse(const char *expected, uint32_t timeout)
 {
   uint32_t start_time = HAL_GetTick();
-  char debug_msg[ESP_RX_BUFFER_SIZE + 32];
+  uint8_t found_expected = 0;
   
   while(HAL_GetTick() - start_time < timeout)
   {
     if(esp_response_ready)
     {
-      /* 调试输出：显示接收到的数据 */
-      snprintf(debug_msg, sizeof(debug_msg), "[ESP RX]: %s\r\n", esp_rx_buffer);
-      USART2_SendString(debug_msg);
-      
       /* 检查是否包含期望的响应 */
       if(strstr((char*)esp_rx_buffer, expected) != NULL)
       {
-        esp_response_ready = 0;
-        return 1;
+        found_expected = 1;
       }
+      
       /* 检查是否包含错误 */
       if(strstr((char*)esp_rx_buffer, "ERROR") != NULL)
       {
         esp_response_ready = 0;
         return 0;
       }
+      
+      /* 检查是否收到OK（表示指令完成） */
+      if(strstr((char*)esp_rx_buffer, "OK") != NULL)
+      {
+        esp_response_ready = 0;
+        /* 如果之前找到了期望的响应，返回成功 */
+        if(found_expected)
+        {
+          return 1;
+        }
+        /* 如果只收到OK但没有期望的响应，继续等待 */
+        /* 因为多行响应可能分多次到达 */
+        continue;
+      }
+      
       /* 重置标志继续等待 */
       esp_response_ready = 0;
     }
     ESP_DELAY(10);
   }
   
-  /* 超时调试信息 */
-  snprintf(debug_msg, sizeof(debug_msg), "[ESP]: Timeout waiting for '%s'\r\n", expected);
-  USART2_SendString(debug_msg);
-  
-  return 0;  // 超时
+  return found_expected;  // 如果找到了期望的响应，即使超时也返回成功
 }
 
 /**
   * @brief 解析IP地址
   * @param None
   * @retval None
-  * @details 从响应中提取IP地址
+  * @details 从响应中提取IP地址，支持多种响应格式
   */
 void ESP_ParseIP(void)
 {
   char *p1, *p2;
   
+  /* 尝试解析AT+CIFSR的响应格式：+CIFSR:IPDEN,"192.168.31.95" */
+  p1 = strstr((char*)esp_rx_buffer, "+CIFSR:IPDEN,\"");
+  if(p1)
+  {
+    p1 += 15;  // 跳过 "+CIFSR:IPDEN,\""
+    p2 = strchr(p1, '\"');
+    if(p2)
+    {
+      int len = p2 - p1;
+      if(len < 20 && len > 0)
+      {
+        strncpy(esp_status.ip_address, p1, len);
+        esp_status.ip_address[len] = '\0';
+        return;
+      }
+    }
+  }
+  
+  /* 尝试解析AT+CIFSR的另一种格式：+CIFSR:STAIP,"192.168.31.95" */
+  p1 = strstr((char*)esp_rx_buffer, "+CIFSR:STAIP,\"");
+  if(p1)
+  {
+    p1 += 15;  // 跳过 "+CIFSR:STAIP,\""
+    p2 = strchr(p1, '\"');
+    if(p2)
+    {
+      int len = p2 - p1;
+      if(len < 20 && len > 0)
+      {
+        strncpy(esp_status.ip_address, p1, len);
+        esp_status.ip_address[len] = '\0';
+        return;
+      }
+    }
+  }
+  
+  /* 尝试解析AT+CIPSTA的响应格式：+CIPSTA:ip:"192.168.31.95" */
   p1 = strstr((char*)esp_rx_buffer, "+CIPSTA:ip:\"");
   if(p1)
   {
@@ -503,10 +848,63 @@ void ESP_ParseIP(void)
     if(p2)
     {
       int len = p2 - p1;
-      if(len < 20)
+      if(len < 20 && len > 0)
       {
         strncpy(esp_status.ip_address, p1, len);
         esp_status.ip_address[len] = '\0';
+        return;
+      }
+    }
+  }
+  
+  /* 尝试解析AT+CIPSTA的另一种格式：+CIPSTA:ip:192.168.31.95（无引号） */
+  p1 = strstr((char*)esp_rx_buffer, "+CIPSTA:ip:");
+  if(p1)
+  {
+    p1 += 11;  // 跳过 "+CIPSTA:ip:"
+    /* 跳过可能的空格 */
+    while(*p1 == ' ') p1++;
+    
+    /* 查找下一个非数字和点的字符 */
+    p2 = p1;
+    while(*p2 && (*p2 == '.' || (*p2 >= '0' && *p2 <= '9')))
+    {
+      p2++;
+    }
+    if(p2 > p1)
+    {
+      int len = p2 - p1;
+      if(len < 20 && len > 0)
+      {
+        strncpy(esp_status.ip_address, p1, len);
+        esp_status.ip_address[len] = '\0';
+        return;
+      }
+    }
+  }
+  
+  /* 尝试解析AT+CIFSR的另一种格式：+CIFSR:STAIP,192.168.31.95（无引号） */
+  p1 = strstr((char*)esp_rx_buffer, "+CIFSR:STAIP,");
+  if(p1)
+  {
+    p1 += 14;  // 跳过 "+CIFSR:STAIP,"
+    /* 跳过可能的空格 */
+    while(*p1 == ' ') p1++;
+    
+    /* 查找下一个非数字和点的字符 */
+    p2 = p1;
+    while(*p2 && (*p2 == '.' || (*p2 >= '0' && *p2 <= '9')))
+    {
+      p2++;
+    }
+    if(p2 > p1)
+    {
+      int len = p2 - p1;
+      if(len < 20 && len > 0)
+      {
+        strncpy(esp_status.ip_address, p1, len);
+        esp_status.ip_address[len] = '\0';
+        return;
       }
     }
   }
@@ -547,18 +945,44 @@ void ESP_ParseMAC(void)
   */
 void ESP_ProcessReceivedData(void)
 {
+  /* 检查是否有新数据行接收完成 */
   if(esp_rx_complete)
   {
-    /* 设置响应就绪标志 */
+    /* 添加字符串结束符 */
+    esp_rx_buffer[esp_rx_index] = '\0';
+    
+    /* 设置响应就绪标志，让主程序处理这一行数据 */
     esp_response_ready = 1;
     
-    /* 重置接收状态 */
+    /* 重置接收状态，准备接收下一行 */
     esp_rx_index = 0;
     esp_rx_complete = 0;
     
-    /* 重新启动接收中断 */
-    HAL_UART_Receive_IT(&huart2, &esp_rx_buffer[esp_rx_index], 1);
+    /* 注意：这里不重新启动接收中断，因为中断已经在持续运行 */
+    return;
   }
+  
+  /* 检查是否有新数据到达但未完成一行（超时检测） */
+  if(esp_rx_index > 0 && HAL_GetTick() - esp_last_rx_time > 50)
+  {
+    /* 超过50ms没有新数据，认为当前数据接收完成 */
+    if(!esp_response_ready)
+    {
+      /* 添加字符串结束符 */
+      esp_rx_buffer[esp_rx_index] = '\0';
+      
+      esp_response_ready = 1;
+      
+      /* 重置接收状态 */
+      esp_rx_index = 0;
+      
+      /* 注意：这里不重新启动接收中断，因为中断已经在持续运行 */
+    }
+  }
+  
+  /* 确保接收中断持续运行（如果意外停止） */
+  /* 注意：在HAL_UART_RxCpltCallback中已经持续重启了中断 */
+  /* 这里只是为了保险起见，防止中断意外停止 */
 }
 
 /**
@@ -617,6 +1041,110 @@ uint8_t ESP_Restart(void)
   ESP_SendATCommand("AT+RST\r\n", 1000);
   ESP_DELAY(2000);  // 等待重启完成
   return ESP_Init();  // 重新初始化
+}
+
+/**
+  * @brief 手动查询IP地址
+  * @param None
+  * @retval ESP_OK: 成功, ESP_ERROR: 失败
+  * @details 发送AT+CIPSTA?指令查询当前IP地址
+  */
+uint8_t ESP_QueryIP(void)
+{
+  char debug_msg[128];
+  DEBUG_SendString("Querying IP address...\r\n");
+  
+  /* 发送查询指令 */
+  ESP_SendATCommand("AT+CIPSTA?\r\n", 1000);
+  
+  /* 等待并解析响应 */
+  uint32_t start_time = HAL_GetTick();
+  uint8_t got_ip = 0;
+  uint8_t response_count = 0;
+  
+  /* 先等待一小段时间让ESP开始响应 */
+  ESP_DELAY(100);
+  
+  while(HAL_GetTick() - start_time < 3000)
+  {
+    if(esp_response_ready)
+    {
+      response_count++;
+      
+      /* 检查所有可能的IP地址格式 */
+      if(strstr((char*)esp_rx_buffer, "+CIPSTA:ip:") != NULL)
+      {
+        ESP_ParseIP();
+        if(strlen(esp_status.ip_address) > 0)
+        {
+          snprintf(debug_msg, sizeof(debug_msg), "[OK] IP Address: %s\r\n", 
+                   esp_status.ip_address);
+          DEBUG_SendString(debug_msg);
+          got_ip = 1;
+        }
+      }
+      else if(strstr((char*)esp_rx_buffer, "ip:") != NULL)
+      {
+        /* 尝试查找不带+CIPSTA:前缀的ip: */
+        char *p1 = strstr((char*)esp_rx_buffer, "ip:");
+        if(p1)
+        {
+          p1 += 3;  // 跳过 "ip:"
+          /* 跳过空格和引号 */
+          while(*p1 == ' ' || *p1 == '"') p1++;
+          
+          /* 提取IP地址 */
+          char *p2 = p1;
+          while(*p2 && (*p2 == '.' || (*p2 >= '0' && *p2 <= '9')))
+          {
+            p2++;
+          }
+          
+          int len = p2 - p1;
+          if(len >= 7 && len < 20)  // 最小IP长度如 1.1.1.1
+          {
+            strncpy(esp_status.ip_address, p1, len);
+            esp_status.ip_address[len] = '\0';
+            snprintf(debug_msg, sizeof(debug_msg), "[OK] IP Address: %s\r\n", 
+                     esp_status.ip_address);
+            DEBUG_SendString(debug_msg);
+            got_ip = 1;
+          }
+        }
+      }
+      
+      /* 检查OK */
+      if(strstr((char*)esp_rx_buffer, "OK") != NULL)
+      {
+        esp_response_ready = 0;
+        if(got_ip)
+        {
+          return ESP_OK;
+        }
+        /* 即使没有IP，也继续等待可能的其他行 */
+        if(response_count >= 3)  // 最多等待3行响应
+        {
+          break;
+        }
+      }
+      
+      /* 检查错误 */
+      if(strstr((char*)esp_rx_buffer, "ERROR") != NULL)
+      {
+        esp_response_ready = 0;
+        break;
+      }
+      
+      esp_response_ready = 0;
+    }
+    ESP_DELAY(10);
+  }
+  
+  /* 打印统计信息 */
+  snprintf(debug_msg, sizeof(debug_msg), "[INFO] Query completed: %d response lines\r\n", response_count);
+  DEBUG_SendString(debug_msg);
+  
+  return got_ip ? ESP_OK : ESP_ERROR;
 }
 
 /* USER CODE END PF */
