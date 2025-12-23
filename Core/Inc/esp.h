@@ -139,6 +139,61 @@ uint8_t ESP_Restart(void);
   */
 uint8_t ESP_QueryIP(void);
 
+/**
+  * @brief 配置MQTT连接参数
+  * @param client_id: MQTT客户端ID
+  * @param username: MQTT用户名
+  * @param password: MQTT密码
+  * @retval ESP_OK: 成功, ESP_ERROR: 失败
+  * @details 配置MQTT用户参数，使用AT+MQTTUSERCFG指令
+  */
+uint8_t ESP_ConfigureMQTT(const char *client_id, const char *username, const char *password);
+
+/**
+  * @brief 连接到MQTT服务器
+  * @param server: MQTT服务器地址（IP或域名）
+  * @param port: MQTT服务器端口
+  * @param enable_ssl: 是否启用SSL (0=不启用, 1=启用)
+  * @retval ESP_OK: 成功, ESP_ERROR: 失败
+  * @details 使用AT+MQTTCONN指令连接MQTT服务器
+  *          指令格式: AT+MQTTCONN=<linkID>,"<host>",<port>,<SSL>
+  *          参数说明:
+  *          - linkID: 链接ID (0-5), 使用0
+  *          - host: MQTT服务器地址
+  *          - port: MQTT服务器端口
+  *          - SSL: SSL标志 (0=不使用SSL, 1=使用SSL), 根据参数设置
+  */
+uint8_t ESP_ConnectMQTT(const char *server, uint16_t port, uint8_t enable_ssl);
+
+/**
+  * @brief 订阅MQTT主题
+  * @param topic: 要订阅的主题名称
+  * @retval ESP_OK: 成功, ESP_ERROR: 失败
+  * @details 使用AT+MQTTSUB指令订阅MQTT主题
+  *          指令格式: AT+MQTTSUB=<linkID>,"<topic>",<qos>
+  *          参数说明:
+  *          - linkID: 链接ID (0-5), 使用0
+  *          - topic: 订阅的主题名称
+  *          - qos: 服务质量等级 (0=最多一次, 1=至少一次, 2=只有一次), 使用1
+  */
+uint8_t ESP_SubscribeMQTT(const char *topic);
+
+/**
+  * @brief 发布MQTT消息
+  * @param topic: 发布消息的主题名称
+  * @param message: 要发布的消息内容
+  * @retval ESP_OK: 成功, ESP_ERROR: 失败
+  * @details 使用AT+MQTTPUB指令发布MQTT消息
+  *          指令格式: AT+MQTTPUB=<linkID>,"<topic>","<message>",<qos>,<retain>
+  *          参数说明:
+  *          - linkID: 链接ID (0-5), 使用0
+  *          - topic: 发布消息的主题名称
+  *          - message: 消息内容
+  *          - qos: 服务质量等级 (0=最多一次, 1=至少一次, 2=只有一次), 使用1
+  *          - retain: 保留标志 (0=不保留, 1=保留), 使用0
+  */
+uint8_t ESP_PublishMQTT(const char *topic, const char *message);
+
 /* USER CODE END EFP */
 
 #ifdef __cplusplus

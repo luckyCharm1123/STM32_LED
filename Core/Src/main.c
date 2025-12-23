@@ -57,8 +57,23 @@
 #define ESP_RX_BUFFER_SIZE 512  // ESP接收缓冲区大小（与esp.c中一致）
 
 /* WiFi配置 - 请修改为您的WiFi信息 */
-#define WIFI_SSID     "Xiaomi_24FB"      // WiFi名称
-#define WIFI_PASSWORD "13454041314"  // WiFi密码
+#define WIFI_SSID     "1901"      // WiFi名称
+#define WIFI_PASSWORD "qjdq1901"  // WiFi密码
+
+/* MQTT配置 */
+#define MQTT_CLIENT_ID "kaiyueT01"  // MQTT客户端ID
+#define MQTT_USERNAME  "test"       // MQTT用户名
+#define MQTT_PASSWORD  "supertest"  // MQTT密码
+
+/* MQTT服务器配置 */
+#define MQTT_SERVER    "156.233.227.40"  // MQTT服务器地址
+#define MQTT_PORT      1588               // MQTT服务器端口
+#define MQTT_SSL       0                  // SSL标志 (0=不启用, 1=启用)
+
+/* MQTT主题和消息配置 */
+#define MQTT_SUBSCRIBE_TOPIC  "testtopic1"  // 订阅的主题
+#define MQTT_PUBLISH_TOPIC   "testtopic2"  // 发布的主题
+#define MQTT_PUBLISH_MESSAGE "hello"        // 发布的消息内容
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -340,6 +355,58 @@ int main(void)
         USART2_SendString("Could not retrieve IP address\r\n");
       }
     }
+    
+    /* WiFi连接成功，配置MQTT */
+    USART2_SendString("Configuring MQTT...\r\n");
+    if(ESP_ConfigureMQTT(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD) == ESP_OK)
+    {
+      USART2_SendString("MQTT configured successfully\r\n");
+      
+      /* MQTT配置成功，连接到MQTT服务器 */
+      USART2_SendString("Connecting to MQTT server...\r\n");
+      if(ESP_ConnectMQTT(MQTT_SERVER, MQTT_PORT, MQTT_SSL) == ESP_OK)
+      {
+        USART2_SendString("MQTT connection successful!\r\n");
+        
+        /* 等待MQTT连接完全建立（重要！） */
+        USART2_SendString("Waiting for MQTT connection to stabilize...\r\n");
+        HAL_Delay(2000);  /* 等待2秒，让MQTT连接完全建立 */
+        
+        /* MQTT连接成功，订阅主题 */
+        USART2_SendString("Subscribing to topic: ");
+        USART2_SendString(MQTT_SUBSCRIBE_TOPIC);
+        USART2_SendString("\r\n");
+        if(ESP_SubscribeMQTT(MQTT_SUBSCRIBE_TOPIC) == ESP_OK)
+        {
+          USART2_SendString("MQTT subscription successful!\r\n");
+          
+          /* 订阅成功，发布消息 */
+          USART2_SendString("Publishing message to topic: ");
+          USART2_SendString(MQTT_PUBLISH_TOPIC);
+          USART2_SendString("\r\n");
+          if(ESP_PublishMQTT(MQTT_PUBLISH_TOPIC, MQTT_PUBLISH_MESSAGE) == ESP_OK)
+          {
+            USART2_SendString("MQTT message published successfully!\r\n");
+          }
+          else
+          {
+            USART2_SendString("MQTT message publish failed\r\n");
+          }
+        }
+        else
+        {
+          USART2_SendString("MQTT subscription failed\r\n");
+        }
+      }
+      else
+      {
+        USART2_SendString("MQTT connection failed\r\n");
+      }
+    }
+    else
+    {
+      USART2_SendString("MQTT configuration failed\r\n");
+    }
   }
   else
   {
@@ -369,6 +436,58 @@ int main(void)
         {
           USART2_SendString("Could not retrieve IP address\r\n");
         }
+      }
+      
+      /* WiFi连接成功，配置MQTT */
+      USART2_SendString("Configuring MQTT...\r\n");
+      if(ESP_ConfigureMQTT(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD) == ESP_OK)
+      {
+        USART2_SendString("MQTT configured successfully\r\n");
+        
+        /* MQTT配置成功，连接到MQTT服务器 */
+        USART2_SendString("Connecting to MQTT server...\r\n");
+        if(ESP_ConnectMQTT(MQTT_SERVER, MQTT_PORT, MQTT_SSL) == ESP_OK)
+        {
+          USART2_SendString("MQTT connection successful!\r\n");
+          
+          /* 等待MQTT连接完全建立（重要！） */
+          USART2_SendString("Waiting for MQTT connection to stabilize...\r\n");
+          HAL_Delay(2000);  /* 等待2秒，让MQTT连接完全建立 */
+          
+          /* MQTT连接成功，订阅主题 */
+          USART2_SendString("Subscribing to topic: ");
+          USART2_SendString(MQTT_SUBSCRIBE_TOPIC);
+          USART2_SendString("\r\n");
+          if(ESP_SubscribeMQTT(MQTT_SUBSCRIBE_TOPIC) == ESP_OK)
+          {
+            USART2_SendString("MQTT subscription successful!\r\n");
+            
+            /* 订阅成功，发布消息 */
+            USART2_SendString("Publishing message to topic: ");
+            USART2_SendString(MQTT_PUBLISH_TOPIC);
+            USART2_SendString("\r\n");
+            if(ESP_PublishMQTT(MQTT_PUBLISH_TOPIC, MQTT_PUBLISH_MESSAGE) == ESP_OK)
+            {
+              USART2_SendString("MQTT message published successfully!\r\n");
+            }
+            else
+            {
+              USART2_SendString("MQTT message publish failed\r\n");
+            }
+          }
+          else
+          {
+            USART2_SendString("MQTT subscription failed\r\n");
+          }
+        }
+        else
+        {
+          USART2_SendString("MQTT connection failed\r\n");
+        }
+      }
+      else
+      {
+        USART2_SendString("MQTT configuration failed\r\n");
       }
     }
     else
@@ -673,10 +792,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
           // 设置响应就绪标志，让等待函数能够立即处理
           esp_response_ready = 1;
           
-          // 重置ESP接收索引，为下一次接收做准备
-          esp_rx_index = 0;
-          DEBUG_SendString("ESP Response Received: ");
-          DEBUG_SendString((char*)esp_rx_buffer);
+          // 注意：不在中断中重置esp_rx_index，避免新数据覆盖未处理的旧数据
+          // esp_rx_index将在ESP_ProcessReceivedData()处理完数据后重置
         }
         // 如果esp_rx_index==0，说明是连续的换行符，直接忽略，不存储
       }
