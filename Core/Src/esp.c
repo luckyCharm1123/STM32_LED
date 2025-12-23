@@ -956,13 +956,14 @@ void ESP_ProcessReceivedData(void)
     esp_rx_buffer[esp_rx_index] = '\0';
     
     /* 检查是否是MQTT接收的消息 */
-    /* 格式: +MQTTSUBRECV=<linkID>,"<topic>",<len>,<data> */
+    /* 格式: +MQTTSUBRECV:0,"testtopic1",3,111 或 +MQTTSUBRECV=0,"testtopic1",3,"111" */
     if(strstr((char*)esp_rx_buffer, "+MQTTSUBRECV") != NULL)
     {
-      DEBUG_SendString("\r\n*** MQTT Message Received ***\r\n");
-      
-      /* 尝试提取主题 */
+      /* 提取主题 */
+      char topic[128] = {0};
+      char message[256] = {0};
       char *topic_start = strstr((char*)esp_rx_buffer, "\"");
+      
       if(topic_start)
       {
         topic_start++;  // 跳过第一个引号
@@ -972,71 +973,76 @@ void ESP_ProcessReceivedData(void)
           int topic_len = topic_end - topic_start;
           if(topic_len > 0 && topic_len < 128)
           {
-            char topic[128];
             strncpy(topic, topic_start, topic_len);
             topic[topic_len] = '\0';
-            snprintf(debug_msg, sizeof(debug_msg), "Topic: %s\r\n", topic);
-            DEBUG_SendString(debug_msg);
           }
         }
       }
       
-      /* 尝试提取消息内容 - 查找逗号后的数据 */
-      /* 格式示例: +MQTTSUBRECV=0,"testtopic1",5,"hello" */
-      char *data_start = (char*)esp_rx_buffer;
-      
-      /* 查找第三个逗号（len后面） */
-      int comma_count = 0;
-      while(*data_start && comma_count < 3)
+      /* 提取消息内容 - 查找最后一个逗号后的数据 */
+      /* 从后往前查找逗号，避免主题中可能包含逗号 */
+      char *data_start = strrchr((char*)esp_rx_buffer, ',');
+      if(data_start)
       {
-        if(*data_start == ',') comma_count++;
-        data_start++;
-      }
-      
-      /* 查找引号开始 */
-      while(*data_start && *data_start != '\"')
-      {
-        data_start++;
-      }
-      
-      if(*data_start == '\"')
-      {
-        data_start++;  // 跳过引号
-        /* 查找消息结束引号 */
-        char *data_end = strchr(data_start, '\"');
-        if(data_end)
+        data_start++;  // 跳过逗号
+        
+        /* 跳过空格 */
+        while(*data_start == ' ') data_start++;
+        
+        /* 检查是否有引号 */
+        if(*data_start == '\"')
         {
-          int data_len = data_end - data_start;
-          if(data_len > 0 && data_len < 128)
+          data_start++;  // 跳过引号
+          char *data_end = strchr(data_start, '\"');
+          if(data_end)
           {
-            snprintf(debug_msg, sizeof(debug_msg), "Message: %.*s\r\n", data_len, data_start);
-            DEBUG_SendString(debug_msg);
+            int data_len = data_end - data_start;
+            if(data_len > 0 && data_len < 256)
+            {
+              strncpy(message, data_start, data_len);
+              message[data_len] = '\0';
+            }
           }
         }
         else
         {
-          /* 没有结束引号，直接打印剩余内容 */
-          int data_len = strlen(data_start);
-          if(data_len > 0 && data_len < 128)
+          /* 没有引号，直接提取到行尾（去除\r\n） */
+          char *data_end = data_start;
+          while(*data_end && *data_end != '\r' && *data_end != '\n')
           {
-            snprintf(debug_msg, sizeof(debug_msg), "Message: %s\r\n", data_start);
-            DEBUG_SendString(debug_msg);
+            data_end++;
+          }
+          int data_len = data_end - data_start;
+          if(data_len > 0 && data_len < 256)
+          {
+            strncpy(message, data_start, data_len);
+            message[data_len] = '\0';
           }
         }
       }
       
-      DEBUG_SendString("*** End of MQTT Message ***\r\n\r\n");
+      /* 简洁输出 - 只显示主题和消息 */
+      if(strlen(topic) > 0 && strlen(message) > 0)
+      {
+        snprintf(debug_msg, sizeof(debug_msg), "[MQTT] %s: %s\r\n", topic, message);
+        DEBUG_SendString(debug_msg);
+        USART2_SendString(debug_msg);
+      }
+      else
+      {
+        /* 解析失败，显示原始数据 */
+        snprintf(debug_msg, sizeof(debug_msg), "[MQTT] Raw: %s\r\n", (char*)esp_rx_buffer);
+        DEBUG_SendString(debug_msg);
+      }
     }
     
     /* 设置响应就绪标志，让主程序处理这一行数据 */
     esp_response_ready = 1;
     
     /* 重置接收状态，准备接收下一行 */
-    /* 关键修复：在这里重置esp_rx_index，确保数据已被处理后再接收新数据 */
     esp_rx_index = 0;
     esp_rx_complete = 0;
     
-    /* 注意：这里不重新启动接收中断，因为中断已经在持续运行 */
     return;
   }
   
@@ -1050,69 +1056,76 @@ void ESP_ProcessReceivedData(void)
       esp_rx_buffer[esp_rx_index] = '\0';
       
       /* 检查是否是MQTT接收的消息 */
-      /* 格式: +MQTTSUBRECV=<linkID>,"<topic>",<len>,<data> */
       if(strstr((char*)esp_rx_buffer, "+MQTTSUBRECV") != NULL)
       {
-        DEBUG_SendString("\r\n*** MQTT Message Received ***\r\n");
-        
-        /* 尝试提取主题 */
+        /* 提取主题和消息 - 使用与上面相同的简化逻辑 */
+        char topic[128] = {0};
+        char message[256] = {0};
         char *topic_start = strstr((char*)esp_rx_buffer, "\"");
+        
         if(topic_start)
         {
-          topic_start++;  // 跳过第一个引号
+          topic_start++;
           char *topic_end = strchr(topic_start, '\"');
           if(topic_end)
           {
             int topic_len = topic_end - topic_start;
             if(topic_len > 0 && topic_len < 128)
             {
-              char topic[128];
               strncpy(topic, topic_start, topic_len);
               topic[topic_len] = '\0';
-              snprintf(debug_msg, sizeof(debug_msg), "Topic: %s\r\n", topic);
-              DEBUG_SendString(debug_msg);
             }
           }
         }
         
-        /* 尝试提取消息内容 */
-        char *data_start = (char*)esp_rx_buffer;
-        int comma_count = 0;
-        while(*data_start && comma_count < 3)
-        {
-          if(*data_start == ',') comma_count++;
-          data_start++;
-        }
-        
-        while(*data_start && *data_start != '\"')
+        /* 提取消息 - 从最后一个逗号开始 */
+        char *data_start = strrchr((char*)esp_rx_buffer, ',');
+        if(data_start)
         {
           data_start++;
-        }
-        
-        if(*data_start == '\"')
-        {
-          data_start++;
-          char *data_end = strchr(data_start, '\"');
-          if(data_end)
+          while(*data_start == ' ') data_start++;
+          
+          if(*data_start == '\"')
           {
-            int data_len = data_end - data_start;
-            if(data_len > 0 && data_len < 128)
+            data_start++;
+            char *data_end = strchr(data_start, '\"');
+            if(data_end)
             {
-              snprintf(debug_msg, sizeof(debug_msg), "Message: %.*s\r\n", data_len, data_start);
-              DEBUG_SendString(debug_msg);
+              int data_len = data_end - data_start;
+              if(data_len > 0 && data_len < 256)
+              {
+                strncpy(message, data_start, data_len);
+                message[data_len] = '\0';
+              }
+            }
+          }
+          else
+          {
+            char *data_end = data_start;
+            while(*data_end && *data_end != '\r' && *data_end != '\n')
+            {
+              data_end++;
+            }
+            int data_len = data_end - data_start;
+            if(data_len > 0 && data_len < 256)
+            {
+              strncpy(message, data_start, data_len);
+              message[data_len] = '\0';
             }
           }
         }
         
-        DEBUG_SendString("*** End of MQTT Message ***\r\n\r\n");
+        /* 简洁输出 */
+        if(strlen(topic) > 0 && strlen(message) > 0)
+        {
+          snprintf(debug_msg, sizeof(debug_msg), "[MQTT] %s: %s\r\n", topic, message);
+          DEBUG_SendString(debug_msg);
+          USART2_SendString(debug_msg);
+        }
       }
       
       esp_response_ready = 1;
-      
-      /* 重置接收状态 */
       esp_rx_index = 0;
-      
-      /* 注意：这里不重新启动接收中断，因为中断已经在持续运行 */
     }
   }
   
@@ -1304,38 +1317,84 @@ uint8_t ESP_QueryIP(void)
 uint8_t ESP_ConfigureMQTT(const char *client_id, const char *username, const char *password)
 {
   char cmd[256];
-  char debug_msg[128];
+  char debug_msg[256];
   
   DEBUG_SendString("\r\n=== MQTT Configuration ===\r\n");
-  
-  /* 构建MQTT配置指令 */
-  /* AT+MQTTUSERCFG=0,1,"client_id","username","password",0,0,"" */
-  snprintf(cmd, sizeof(cmd), "AT+MQTTUSERCFG=0,3,\"%s\",\"%s\",\"%s\",0,0,\"\"\r\n", 
-           client_id, username, password);
   
   /* 打印配置信息 */
   snprintf(debug_msg, sizeof(debug_msg), "Client ID: %s\r\n", client_id);
   DEBUG_SendString(debug_msg);
   snprintf(debug_msg, sizeof(debug_msg), "Username: %s\r\n", username);
   DEBUG_SendString(debug_msg);
-  DEBUG_SendString("Sending AT+MQTTUSERCFG command...\r\n");
+  
+  /* 先尝试断开之前可能存在的MQTT连接 */
+  DEBUG_SendString("Step 1: Disconnecting previous MQTT connection (if any)...\r\n");
+  ESP_SendATCommand("AT+MQTTCLEAN=0\r\n", 500);
+  ESP_DELAY(500);
+  
+  /* 构建MQTT配置指令 */
+  /* 尝试不同的scheme参数值 */
+  /* scheme参数说明: 1=TCP, 2=TLS(无证书验证), 3=TLS(验证服务器证书), 4=TLS(提供客户端证书), 5=TLS(双向验证) */
+  /* 对于无SSL的连接，使用scheme=1 */
+  snprintf(cmd, sizeof(cmd), "AT+MQTTUSERCFG=0,1,\"%s\",\"%s\",\"%s\",0,0,\"\"\r\n", 
+           client_id, username, password);
+  
+  snprintf(debug_msg, sizeof(debug_msg), "Step 2: Sending command: %s", cmd);
+  DEBUG_SendString(debug_msg);
   
   /* 发送配置指令 */
   ESP_SendATCommand(cmd, 1000);
   
-  /* 等待响应 */
-  if(ESP_WaitForResponse("OK", 3000))
+  /* 等待响应 - 增加超时时间并显示详细错误信息 */
+  uint32_t start_time = HAL_GetTick();
+  uint8_t got_response = 0;
+  
+  while(HAL_GetTick() - start_time < 5000)
   {
-    DEBUG_SendString("[OK] MQTT configuration successful\r\n");
-    DEBUG_SendString("=== MQTT Configuration Complete ===\r\n\r\n");
-    return ESP_OK;
+    if(esp_response_ready)
+    {
+      got_response = 1;
+      
+      /* 打印收到的响应 */
+      snprintf(debug_msg, sizeof(debug_msg), "ESP Response: %s\r\n", (char*)esp_rx_buffer);
+      DEBUG_SendString(debug_msg);
+      
+      if(strstr((char*)esp_rx_buffer, "OK") != NULL)
+      {
+        DEBUG_SendString("[OK] MQTT configuration successful\r\n");
+        DEBUG_SendString("=== MQTT Configuration Complete ===\r\n\r\n");
+        esp_response_ready = 0;
+        return ESP_OK;
+      }
+      
+      if(strstr((char*)esp_rx_buffer, "ERROR") != NULL)
+      {
+        DEBUG_SendString("[ERROR] MQTT configuration command returned ERROR\r\n");
+        DEBUG_SendString("Possible reasons:\r\n");
+        DEBUG_SendString("  - Invalid scheme parameter\r\n");
+        DEBUG_SendString("  - MQTT already configured (try AT+MQTTCLEAN=0 first)\r\n");
+        DEBUG_SendString("  - Firmware doesn't support this AT command\r\n");
+        DEBUG_SendString("=== MQTT Configuration Failed ===\r\n\r\n");
+        esp_response_ready = 0;
+        return ESP_ERROR;
+      }
+      
+      esp_response_ready = 0;
+    }
+    ESP_DELAY(10);
+  }
+  
+  if(!got_response)
+  {
+    DEBUG_SendString("[ERROR] No response from ESP module (timeout)\r\n");
   }
   else
   {
-    DEBUG_SendString("[ERROR] MQTT configuration failed\r\n");
-    DEBUG_SendString("=== MQTT Configuration Failed ===\r\n\r\n");
-    return ESP_ERROR;
+    DEBUG_SendString("[ERROR] Unexpected response or timeout\r\n");
   }
+  
+  DEBUG_SendString("=== MQTT Configuration Failed ===\r\n\r\n");
+  return ESP_ERROR;
 }
 
 /**
@@ -1458,6 +1517,10 @@ uint8_t ESP_SubscribeMQTT(const char *topic)
   
   DEBUG_SendString("\r\n=== MQTT Subscribe ===\r\n");
   
+  /* 等待MQTT连接稳定 - 非常重要！ */
+  DEBUG_SendString("Waiting for MQTT connection to stabilize...\r\n");
+  ESP_DELAY(2000);  // 等待2秒让MQTT连接完全建立
+  
   /* 先清除缓冲区中的任何残留数据 */
   uint32_t clear_start = HAL_GetTick();
   while(esp_response_ready && (HAL_GetTick() - clear_start < 1000))
@@ -1467,7 +1530,9 @@ uint8_t ESP_SubscribeMQTT(const char *topic)
     ESP_DELAY(10);
   }
   
-  /* 构建订阅指令 - AT+MQTTSUB=0,"topic",1 */
+  /* 构建订阅指令 - AT+MQTTSUB=0,"topic",1 
+   * 注意：某些ESP固件版本可能需要不同的指令格式
+   * 先尝试标准格式，如果失败再尝试其他格式 */
   snprintf(cmd, sizeof(cmd), "AT+MQTTSUB=0,\"%s\",1\r\n", topic);
   
   /* 打印订阅信息 */
@@ -1478,6 +1543,18 @@ uint8_t ESP_SubscribeMQTT(const char *topic)
   snprintf(debug_msg, sizeof(debug_msg), "Command: %s", cmd);
   DEBUG_SendString(debug_msg);
   DEBUG_SendString("Sending AT+MQTTSUB command...\r\n");
+  
+  /* 发送订阅指令 */
+  DEBUG_SendString("Clearing any pending responses before subscription...\r\n");
+  
+  /* 先清除可能的残留响应 - 重置clear_start变量 */
+  clear_start = HAL_GetTick();
+  while(esp_response_ready && (HAL_GetTick() - clear_start < 500))
+  {
+    DEBUG_SendString("  Clearing old response...\r\n");
+    esp_response_ready = 0;
+    ESP_DELAY(20);
+  }
   
   /* 发送订阅指令 */
   ESP_SendATCommand(cmd, 1000);
@@ -1509,6 +1586,78 @@ uint8_t ESP_SubscribeMQTT(const char *topic)
       else if(response_count == 4)
       {
         DEBUG_SendString("[INFO] More responses received, suppressing output...\r\n");
+      }
+      
+      /* 检查是否包含命令回显（去除回显部分） */
+      char *response_start = (char*)esp_rx_buffer;
+      
+      /* 查找命令回显 - 注意：回显可能不完整或格式不同 */
+      char *echo_end = strstr((char*)esp_rx_buffer, "AT+MQTTSUB");
+      if(echo_end)
+      {
+        /* 跳过命令回显部分，查找下一个非命令字符 */
+        char *cmd_end = echo_end;
+        while(*cmd_end && *cmd_end != '\r' && *cmd_end != '\n' && 
+              *cmd_end != 'E' && *cmd_end != 'O' && *cmd_end != 'S')
+        {
+          cmd_end++;
+        }
+        
+        /* 现在cmd_end指向回显结束位置，可能是ERROR、OK或其他 */
+        response_start = cmd_end;
+        
+        /* 跳过可能的空格和换行 */
+        while(*response_start == '\r' || *response_start == '\n' || *response_start == ' ')
+        {
+          response_start++;
+        }
+        
+        /* 如果回显后还有内容，重新检查 */
+        if(*response_start != '\0')
+        {
+          /* 重新检查去除回显后的内容 */
+          if(strstr(response_start, "OK") != NULL)
+          {
+            got_ok = 1;
+            DEBUG_SendString("[OK] Subscription successful (after removing echo)\r\n");
+            DEBUG_SendString("=== MQTT Subscribe Complete ===\r\n\r\n");
+            esp_response_ready = 0;
+            return ESP_OK;
+          }
+          
+          if(strstr(response_start, "ERROR") != NULL)
+          {
+            DEBUG_SendString("[ERROR] Subscription failed (after removing echo)\r\n");
+            DEBUG_SendString("=== MQTT Subscribe Failed ===\r\n\r\n");
+            esp_response_ready = 0;
+            return ESP_ERROR;
+          }
+        }
+      }
+      
+      /* 也检查原始响应中的ERROR（即使没有回显） */
+      if(strstr((char*)esp_rx_buffer, "ERROR") != NULL && !got_ok)
+      {
+        /* 检查ERROR是否在命令之后（可能是命令回显+ERROR） */
+        char *error_pos = strstr((char*)esp_rx_buffer, "ERROR");
+        char *at_pos = strstr((char*)esp_rx_buffer, "AT+");
+        
+        if(at_pos && error_pos && error_pos > at_pos)
+        {
+          /* 这是命令回显+ERROR的情况 */
+          DEBUG_SendString("[ERROR] Command failed (echo + ERROR)\r\n");
+          DEBUG_SendString("=== MQTT Subscribe Failed ===\r\n\r\n");
+          esp_response_ready = 0;
+          return ESP_ERROR;
+        }
+        else if(!at_pos && error_pos)
+        {
+          /* 这是纯ERROR响应 */
+          DEBUG_SendString("[ERROR] Subscription failed\r\n");
+          DEBUG_SendString("=== MQTT Subscribe Failed ===\r\n\r\n");
+          esp_response_ready = 0;
+          return ESP_ERROR;
+        }
       }
       
       /* 检查是否收到OK */

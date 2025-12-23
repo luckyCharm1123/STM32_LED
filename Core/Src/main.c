@@ -496,27 +496,43 @@ int main(void)
     }
   }
   
-  /* 切换回用户命令模式 */
-  esp_mode = 0;
-  rx_index = 0;
-  rx_complete = 0;
-  HAL_UART_Receive_IT(&huart2, &rx_buffer[rx_index], 1);
+  /* 保持ESP数据模式，持续接收MQTT消息 */
+  /* 注意：esp_mode=1 表示所有USART2数据都会被当作ESP数据处理 */
+  /* 如果需要接收用户命令，需要切换到esp_mode=0 */
+  USART2_SendString("\r\n[INFO] System ready. Listening for MQTT messages...\r\n");
+  USART2_SendString("[INFO] UART is in ESP data mode. All data from USART2 goes to ESP module.\r\n");
+  DEBUG_SendString("\r\n[SYSTEM] Entering main loop - ESP mode active\r\n");
+  DEBUG_SendString("[SYSTEM] Will continuously process MQTT messages\r\n\r\n");
+  
+  /* esp_mode保持为1，继续接收ESP数据（包括MQTT消息） */
+  /* UART中断已经在运行中，无需重新启动 */
   
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* 无限循环 */
   /* USER CODE BEGIN WHILE */
+  
+  /* LED闪烁控制变量 - 使用非阻塞延时 */
+  uint32_t led_last_toggle_time = HAL_GetTick();
+  uint32_t led_toggle_interval = 500;  // LED翻转间隔（毫秒）
+  
   while (1)
   {
     /* USER CODE END WHILE */
     
-    /* 处理ESP接收到的数据 */
+    /* 处理ESP接收到的数据 - 高优先级，快速响应 */
     ESP_ProcessReceivedData();
     
-    /* LED闪烁逻辑 */
-    HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);  // 翻转LED引脚电平（亮/灭切换）
-    HAL_Delay(500);                              // 延时500毫秒
+    /* LED闪烁逻辑 - 使用非阻塞延时，不影响ESP数据处理 */
+    if(HAL_GetTick() - led_last_toggle_time >= led_toggle_interval)
+    {
+      HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);  // 翻转LED引脚电平（亮/灭切换）
+      led_last_toggle_time = HAL_GetTick();        // 更新最后翻转时间
+    }
+    
+    /* 短暂延时，避免CPU空转，但不阻塞ESP数据处理 */
+    HAL_Delay(10);  // 10ms延时，确保ESP数据能及时处理
     
     /* USER CODE BEGIN 3 */
     /* 用户代码开始：第3区 */
