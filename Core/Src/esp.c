@@ -548,7 +548,7 @@ uint8_t ESP_ConnectWiFi(const char *ssid, const char *password)
         
         /* 打印统计信息 */
         snprintf(debug_msg, sizeof(debug_msg), "[INFO] Received %d response lines in %lu ms\r\n", 
-                 response_count, HAL_GetTick() - ip_start_time);
+                 response_count, (unsigned long)(HAL_GetTick() - ip_start_time));
         DEBUG_SendString(debug_msg);
         
         if(!got_ip_info)
@@ -947,7 +947,7 @@ void ESP_ParseMAC(void)
   */
 void ESP_ProcessReceivedData(void)
 {
-  char debug_msg[256];
+  char debug_msg[512];  /* 增加缓冲区以避免truncation警告 */
   
   /* 检查是否有新数据行接收完成 */
   if(esp_rx_complete)
@@ -1030,8 +1030,10 @@ void ESP_ProcessReceivedData(void)
       }
       else
       {
-        /* 解析失败，显示原始数据 */
-        snprintf(debug_msg, sizeof(debug_msg), "[MQTT] Raw: %s\r\n", (char*)esp_rx_buffer);
+        /* 解析失败，显示原始数据（限制长度） */
+        int buf_len = strlen((char*)esp_rx_buffer);
+        if(buf_len > 200) buf_len = 200;  /* 限制最大显示长度 */
+        snprintf(debug_msg, sizeof(debug_msg), "[MQTT] Raw: %.*s\r\n", buf_len, (char*)esp_rx_buffer);
         DEBUG_SendString(debug_msg);
       }
     }
@@ -1317,7 +1319,7 @@ uint8_t ESP_QueryIP(void)
 uint8_t ESP_ConfigureMQTT(const char *client_id, const char *username, const char *password)
 {
   char cmd[256];
-  char debug_msg[256];
+  char debug_msg[512];  /* 增加缓冲区以避免truncation警告 */
   
   DEBUG_SendString("\r\n=== MQTT Configuration ===\r\n");
   
@@ -1355,8 +1357,10 @@ uint8_t ESP_ConfigureMQTT(const char *client_id, const char *username, const cha
     {
       got_response = 1;
       
-      /* 打印收到的响应 */
-      snprintf(debug_msg, sizeof(debug_msg), "ESP Response: %s\r\n", (char*)esp_rx_buffer);
+      /* 打印收到的响应（限制长度） */
+      int resp_len = strlen((char*)esp_rx_buffer);
+      if(resp_len > 200) resp_len = 200;  /* 限制最大显示长度 */
+      snprintf(debug_msg, sizeof(debug_msg), "ESP Response: %.*s\r\n", resp_len, (char*)esp_rx_buffer);
       DEBUG_SendString(debug_msg);
       
       if(strstr((char*)esp_rx_buffer, "OK") != NULL)
@@ -1513,7 +1517,7 @@ uint8_t ESP_ConnectMQTT(const char *server, uint16_t port, uint8_t enable_ssl)
 uint8_t ESP_SubscribeMQTT(const char *topic)
 {
   char cmd[128];
-  char debug_msg[256];
+  char debug_msg[512];  /* 增加缓冲区以避免truncation警告 */
   
   DEBUG_SendString("\r\n=== MQTT Subscribe ===\r\n");
   
@@ -1563,7 +1567,6 @@ uint8_t ESP_SubscribeMQTT(const char *topic)
   uint32_t start_time = HAL_GetTick();
   uint8_t got_ok = 0;
   uint8_t response_count = 0;
-  uint8_t first_response_printed = 0;
   
   /* 最多等待10秒（增加超时时间） */
   while(HAL_GetTick() - start_time < 10000)
@@ -1579,7 +1582,7 @@ uint8_t ESP_SubscribeMQTT(const char *topic)
         if(esp_len > 100) {
           snprintf(debug_msg, sizeof(debug_msg), "[ESP Response #%d]: %.100s...\r\n", response_count, (char*)esp_rx_buffer);
         } else {
-          snprintf(debug_msg, sizeof(debug_msg), "[ESP Response #%d]: %s\r\n", response_count, (char*)esp_rx_buffer);
+          snprintf(debug_msg, sizeof(debug_msg), "[ESP Response #%d]: %.*s\r\n", response_count, esp_len, (char*)esp_rx_buffer);
         }
         DEBUG_SendString(debug_msg);
       }
