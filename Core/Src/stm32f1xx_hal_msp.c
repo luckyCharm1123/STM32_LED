@@ -84,6 +84,60 @@ void HAL_MspInit(void)
 /* USER CODE BEGIN 1 */
 
 /**
+  * @brief ADC MSP Initialization
+  * @param hadc: ADC handle pointer
+  * @retval None
+  */
+void HAL_ADC_MspInit(ADC_HandleTypeDef* hadc)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  if(hadc->Instance==ADC1)
+  {
+    /* USER CODE BEGIN ADC1_MspInit 0 */
+    /* USER CODE END ADC1_MspInit 0 */
+
+    /* Peripheral clock enable */
+    __HAL_RCC_ADC1_CLK_ENABLE();
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+
+    /**ADC1 GPIO Configuration
+    PA0-WKUP     ------> ADC1_IN0
+    */
+    GPIO_InitStruct.Pin = GPIO_PIN_0;
+    GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    /* USER CODE BEGIN ADC1_MspInit 1 */
+    /* USER CODE END ADC1_MspInit 1 */
+  }
+}
+
+/**
+  * @brief ADC MSP De-Initialization
+  * @param hadc: ADC handle pointer
+  * @retval None
+  */
+void HAL_ADC_MspDeInit(ADC_HandleTypeDef* hadc)
+{
+  if(hadc->Instance==ADC1)
+  {
+    /* USER CODE BEGIN ADC1_MspDeInit 0 */
+    /* USER CODE END ADC1_MspDeInit 0 */
+
+    /* Peripheral clock disable */
+    __HAL_RCC_ADC1_CLK_DISABLE();
+
+    /**ADC1 GPIO Configuration
+    PA0-WKUP     ------> ADC1_IN0
+    */
+    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_0);
+
+    /* USER CODE BEGIN ADC1_MspDeInit 1 */
+    /* USER CODE END ADC1_MspDeInit 1 */
+  }
+}
+
+/**
   * @brief UART MSP Initialization 
   *        This function configures the hardware resources used in this example
   * @param huart: UART handle pointer
@@ -160,6 +214,98 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart)
     /* USER CODE BEGIN USART2_MspInit 1 */
     
     /* USER CODE END USART2_MspInit 1 */
+  }
+}
+
+/**
+  * @brief I2C MSP Initialization 
+  *        This function configures the hardware resources used for I2C
+  * @param hi2c: I2C handle pointer
+  * @retval None
+  */
+void HAL_I2C_MspInit(I2C_HandleTypeDef *hi2c)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  
+  if(hi2c->Instance == I2C1)
+  {
+    /* USER CODE BEGIN I2C1_MspInit 0 */
+    
+    /* USER CODE END I2C1_MspInit 0 */
+    
+    /* Peripheral clock enable */
+    __HAL_RCC_I2C1_CLK_ENABLE();  // 使能I2C1时钟
+    __HAL_RCC_AFIO_CLK_ENABLE();  // 使能AFIO时钟（引脚重映射需要）
+    
+    /* I2C1 GPIO Configuration    
+    PB6     ------> I2C1_SCL
+    PB7     ------> I2C1_SDA
+    */
+    __HAL_RCC_GPIOB_CLK_ENABLE();  // 使能GPIOB时钟
+    
+    /* 尝试通过GPIO时序释放I2C总线（如果总线卡死） */
+    GPIO_InitStruct.Pin = GPIO_PIN_6 | GPIO_PIN_7;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;      // 开漏输出
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+    
+    /* 发送9个时钟脉冲来释放总线 */
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_SET);  // SDA拉高
+    for(int i = 0; i < 9; i++)
+    {
+      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_RESET);  // SCL低
+      for(volatile int j = 0; j < 100; j++);  // 延时
+      HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, GPIO_PIN_SET);    // SCL高
+      for(volatile int j = 0; j < 100; j++);  // 延时
+    }
+    
+    /* 配置I2C1_SCL引脚 (PB6) - 临时启用内部上拉 */
+    GPIO_InitStruct.Pin = GPIO_PIN_6;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;          // 复用开漏输出
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;     // 低速模式（匹配10kHz时钟）
+    GPIO_InitStruct.Pull = GPIO_PULLUP;              // 启用内部上拉（临时方案）
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+    
+    /* 配置I2C1_SDA引脚 (PB7) - 临时启用内部上拉 */
+    GPIO_InitStruct.Pin = GPIO_PIN_7;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_OD;          // 复用开漏输出
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;     // 低速模式（匹配10kHz时钟）
+    GPIO_InitStruct.Pull = GPIO_PULLUP;              // 启用内部上拉（临时方案）
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+    
+    /* USER CODE BEGIN I2C1_MspInit 1 */
+    
+    /* USER CODE END I2C1_MspInit 1 */
+  }
+}
+
+/**
+  * @brief I2C MSP De-Initialization 
+  *        This function release the hardware resources used for I2C
+  * @param hi2c: I2C handle pointer
+  * @retval None
+  */
+void HAL_I2C_MspDeInit(I2C_HandleTypeDef *hi2c)
+{
+  if(hi2c->Instance == I2C1)
+  {
+    /* USER CODE BEGIN I2C1_MspDeInit 0 */
+    
+    /* USER CODE END I2C1_MspDeInit 0 */
+    
+    /* Peripheral clock disable */
+    __HAL_RCC_I2C1_CLK_DISABLE();  // 禁用I2C1时钟
+    
+    /* I2C1 GPIO Configuration    
+    PB6     ------> I2C1_SCL
+    PB7     ------> I2C1_SDA
+    */
+    HAL_GPIO_DeInit(GPIOB, GPIO_PIN_6 | GPIO_PIN_7);  // 复位GPIO引脚
+    
+    /* USER CODE BEGIN I2C1_MspDeInit 1 */
+    
+    /* USER CODE END I2C1_MspDeInit 1 */
   }
 }
 

@@ -41,6 +41,7 @@
 #include <string.h> // 用于字符串操作，如strlen、strncmp、memset等
 #include <stdlib.h> // 用于atoi函数，字符串转整数
 #include "esp.h"    // ESP-01S模块驱动
+#include "sht30_soft.h"  // SHT30温湿度传感器驱动（软件I2C版本）
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -72,7 +73,7 @@
 
 /* MQTT主题和消息配置 */
 #define MQTT_SUBSCRIBE_TOPIC  "testtopic1"  // 订阅的主题
-#define MQTT_PUBLISH_TOPIC   "testtopic2"  // 发布的主题
+#define MQTT_PUBLISH_TOPIC   "kaiyueTopic"  // 发布的主题
 #define MQTT_PUBLISH_MESSAGE "hello"        // 发布的消息内容
 /* USER CODE END PD */
 
@@ -84,6 +85,8 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* 私有变量 */
+// I2C_HandleTypeDef hi2c1;    // 已不需要（改用软件I2C）
+ADC_HandleTypeDef hadc1;    // ADC1句柄，用于雨水传感器（PA0）
 UART_HandleTypeDef huart1;  // USART1句柄，用于调试输出（PA9/PA10，115200）
 UART_HandleTypeDef huart2;  // USART2句柄，用于管理串口2的所有操作
 
@@ -112,6 +115,8 @@ extern uint32_t esp_last_rx_time;   // ESP最后接收时间戳
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);  // 系统时钟配置函数声明
 static void MX_GPIO_Init(void); // GPIO初始化函数声明（静态函数，仅在本文件内可见）
+// static void MX_I2C1_Init(void); // 已不需要（改用软件I2C）
+static void MX_ADC1_Init(void); // ADC1初始化函数声明（雨水传感器）
 static void MX_USART1_UART_Init(void); // USART1初始化函数声明（调试串口）
 static void MX_USART2_UART_Init(void); // USART2初始化函数声明
 
@@ -312,6 +317,7 @@ int main(void)
   /* Initialize all configured peripherals */
   /* 初始化所有配置的外设 */
   MX_GPIO_Init();              // 初始化GPIO（LED引脚）
+  MX_ADC1_Init();              // 初始化ADC1（雨水传感器，PA0）
   MX_USART1_UART_Init();       // 初始化USART1（调试串口）
   MX_USART2_UART_Init();       // 初始化USART2（串口）
   
@@ -319,11 +325,53 @@ int main(void)
   /* 设置为ESP模式，避免触发用户命令处理逻辑 */
   esp_mode = 1;
   
+  /* 信息缓冲区 */
+  char info_buffer[100];
+  
   /* 发送调试信息到USART1（调试串口） */
   DEBUG_SendString("\r\n=== STM32F103 Debug Port (USART1) ===\r\n");
   DEBUG_SendString("Port: PA9(TX) / PA10(RX)\r\n");
   DEBUG_SendString("Baud: 115200 8N1\r\n");
   DEBUG_SendString("System starting...\r\n\r\n");
+  
+  /* 初始化SHT30温湿度传感器（软件I2C版本） */
+  DEBUG_SendString("=== SHT30 Sensor Initialization (Software I2C) ===\r\n");
+  DEBUG_SendString("Using GPIO simulation I2C - No pull-up resistors needed!\r\n");
+  DEBUG_SendString("Pins: PB6=SCL, PB7=SDA\r\n");
+  DEBUG_SendString("I2C Address: 0x88 (0x44<<1, write mode)\r\n\r\n");
+  
+  SHT30_Soft_Init();  // 初始化软件I2C
+  HAL_Delay(200);
+  
+  DEBUG_SendString("Testing I2C communication...\r\n");
+  SHT30_Soft_Test();  // 测试I2C通信
+  
+  DEBUG_SendString("\r\nReading sensor data...\r\n");
+  float test_temp, test_humi;
+  uint8_t read_result = SHT30_Soft_Read(&test_temp, &test_humi);
+  
+  /* 转换为整数输出 */
+  int temp_int = (int)test_temp;
+  int temp_dec = (int)((test_temp - temp_int) * 100);
+  int humi_int = (int)test_humi;
+  int humi_dec = (int)((test_humi - humi_int) * 100);
+  
+  if(read_result == 0)
+  {
+    snprintf(info_buffer, sizeof(info_buffer), "[OK] SHT30 initialized! Temp: %d.%02d°C, Humi: %d.%02d%%\r\n", 
+             temp_int, temp_dec, humi_int, humi_dec);
+    DEBUG_SendString(info_buffer);
+    USART2_SendString("[INFO] SHT30 sensor ready\r\n");
+  }
+  else
+  {
+    snprintf(info_buffer, sizeof(info_buffer), "[WARN] CRC failed, but got data: Temp: %d.%02d°C, Humi: %d.%02d%%\r\n", 
+             temp_int, temp_dec, humi_int, humi_dec);
+    DEBUG_SendString(info_buffer);
+    USART2_SendString("[WARN] SHT30 CRC error\r\n");
+  }
+  
+  DEBUG_SendString("=== SHT30 Initialization Complete ===\r\n\r\n");
   
   /* 启动串口接收中断，用于接收ESP模块的响应 */
   HAL_UART_Receive_IT(&huart2, &rx_buffer[0], 1);
@@ -517,12 +565,87 @@ int main(void)
   uint32_t led_last_toggle_time = HAL_GetTick();
   uint32_t led_toggle_interval = 500;  // LED翻转间隔（毫秒）
   
+  /* SHT30传感器读取控制变量 */
+  uint32_t sht30_last_read_time = HAL_GetTick();
+  uint32_t sht30_read_interval = 10000;  // SHT30读取间隔（10秒）
+  float sht30_temp, sht30_humi;
+  
+  /* 雨水传感器读取控制变量 */
+  uint32_t rain_last_read_time = HAL_GetTick();
+  uint32_t rain_read_interval = 2000;  // 雨水传感器读取间隔（2秒）
+  
+  DEBUG_SendString("[INFO] SHT30 reading interval: 10 seconds\r\n");
+  DEBUG_SendString("[INFO] Rain sensor reading interval: 2 seconds (PA0/ADC1_CH0)\r\n");
+  USART2_SendString("[INFO] SHT30 will output every 10 seconds\r\n");
+  
   while (1)
   {
     /* USER CODE END WHILE */
     
     /* 处理ESP接收到的数据 - 高优先级，快速响应 */
     ESP_ProcessReceivedData();
+    
+    /* SHT30温湿度读取 - 每5秒读取一次（软件I2C） */
+    if(HAL_GetTick() - sht30_last_read_time >= sht30_read_interval)
+    {
+      uint8_t ret = SHT30_Soft_Read(&sht30_temp, &sht30_humi);
+      
+      /* 转换为整数输出（避免浮点printf问题） */
+      int temp_int = (int)sht30_temp;
+      int temp_dec = (int)((sht30_temp - temp_int) * 100);
+      int humi_int = (int)sht30_humi;
+      int humi_dec = (int)((sht30_humi - humi_int) * 100);
+      
+      char temp_str[100];
+      if(ret == 0)
+      {
+        /* CRC成功 */
+        snprintf(temp_str, sizeof(temp_str), "[SHT30] Temp: %d.%02d°C, Humidity: %d.%02d%%\r\n", 
+                 temp_int, temp_dec, humi_int, humi_dec);
+        DEBUG_SendString(temp_str);  // 发送到调试串口USART1
+        USART2_SendString(temp_str); // 发送到主串口USART2
+      }
+      
+      sht30_last_read_time = HAL_GetTick();
+    }
+    
+    /* 雨水传感器读取 - 每2秒读取一次（ADC） */
+    if(HAL_GetTick() - rain_last_read_time >= rain_read_interval)
+    {
+      /* 启动ADC转换 */
+      HAL_ADC_Start(&hadc1);
+      
+      /* 等待转换完成（超时1秒） */
+      if(HAL_ADC_PollForConversion(&hadc1, 1000) == HAL_OK)
+      {
+        /* 读取ADC值（12位，0-4095） */
+        uint32_t adc_value = HAL_ADC_GetValue(&hadc1);
+        
+        /* 计算电压值（假设参考电压3.3V） */
+        float voltage = (adc_value * 3.3f) / 4095.0f;
+        
+        /* 计算干燥度（0-100%，值越大表示越干燥） */
+        uint32_t dry_percent = (adc_value * 100) / 4095;
+        
+        /* 计算湿度（0-100%，值越大表示越潮湿/有水） */
+        uint32_t wet_percent = 100 - dry_percent;
+        
+        /* 输出到调试串口和主串口 */
+        char rain_str[120];
+        snprintf(rain_str, sizeof(rain_str), 
+                 "[RAIN] ADC=%lu, Voltage=%d.%02dV, Dry=%lu%%, Wet=%lu%%\r\n", 
+                 adc_value, 
+                 (int)voltage, (int)((voltage - (int)voltage) * 100),
+                 dry_percent, wet_percent);
+        DEBUG_SendString(rain_str);
+        USART2_SendString(rain_str);
+      }
+      
+      /* 停止ADC转换 */
+      HAL_ADC_Stop(&hadc1);
+      
+      rain_last_read_time = HAL_GetTick();
+    }
     
     /* LED闪烁逻辑 - 使用非阻塞延时，不影响ESP数据处理 */
     if(HAL_GetTick() - led_last_toggle_time >= led_toggle_interval)
@@ -652,6 +775,58 @@ static void MX_USART1_UART_Init(void)
 }
 
 /**
+  * @brief I2C1 Initialization Function I2C1初始化函数
+  * @param None 无参数
+  * @retval None 无返回值
+  * @details 配置I2C1参数：
+  *          - 时钟速度：100kHz（标准模式）
+  *          - 寻址模式：7位地址
+  *          - 占空比：2:1
+  *          - 引脚：SCL=PB6, SDA=PB7
+  * @note I2C1挂载在APB1总线上，用于连接SHT30温湿度传感器
+  * @note 已改用软件I2C，此函数不再使用
+  */
+#if 0  // 已改用软件I2C，不再使用硬件I2C
+static void MX_I2C1_Init(void)
+{
+  /* USER CODE BEGIN I2C1_Init 0 */
+  /* 用户代码开始：I2C1初始化第0区 */
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+  /* 用户代码开始：I2C1初始化第1区 */
+  /* USER CODE END I2C1_Init 1 */
+
+  /* 强制复位I2C1外设 */
+  __HAL_RCC_I2C1_FORCE_RESET();
+  HAL_Delay(10);
+  __HAL_RCC_I2C1_RELEASE_RESET();
+  HAL_Delay(10);
+  
+  /* 配置I2C1句柄参数 */
+  hi2c1.Instance = I2C1;                         // I2C1实例
+  hi2c1.Init.ClockSpeed = 10000;                 // 时钟速度：10kHz（降低速度提高稳定性）
+  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;        // 占空比：2:1
+  hi2c1.Init.OwnAddress1 = 0;                    // 自身地址（主机模式不使用）
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;  // 7位地址模式
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE; // 禁用双地址模式
+  hi2c1.Init.OwnAddress2 = 0;                    // 第二地址（未使用）
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE; // 禁用广播呼叫
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;     // 禁用时钟延展禁止
+  
+  /* 应用I2C1配置 */
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();  // 如果初始化失败，调用错误处理函数
+  }
+  
+  /* USER CODE BEGIN I2C1_Init 2 */
+  /* 用户代码开始：I2C1初始化第2区 */
+  /* USER CODE END I2C1_Init 2 */
+}
+#endif  // 硬件I2C已禁用
+
+/**
   * @brief USART2 Initialization Function USART2初始化函数
   * @param None 无参数
   * @retval None 无返回值
@@ -759,6 +934,48 @@ static void MX_GPIO_Init(void)
   /* 用户代码开始：GPIO初始化第2区 */
   /* 可以在此处添加GPIO初始化后的自定义代码 */
   /* USER CODE END MX_GPIO_Init_2 */
+}
+
+/**
+  * @brief ADC1 Initialization Function
+  * @details 初始化ADC1用于读取雨水传感器（PA0，ADC1通道0）
+  *          配置：12位分辨率，单次转换模式
+  * @param None
+  * @retval None
+  */
+static void MX_ADC1_Init(void)
+{
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC1_Init 0 */
+  /* USER CODE END ADC1_Init 0 */
+
+  /* USER CODE BEGIN ADC1_Init 1 */
+  /* USER CODE END ADC1_Init 1 */
+
+  /** Common config */
+  hadc1.Instance = ADC1;
+  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;           // 禁用扫描模式（单通道）
+  hadc1.Init.ContinuousConvMode = DISABLE;              // 禁用连续转换
+  hadc1.Init.DiscontinuousConvMode = DISABLE;           // 禁用间断转换
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;     // 软件触发
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;           // 数据右对齐
+  hadc1.Init.NbrOfConversion = 1;                       // 转换通道数量：1
+  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Channel */
+  sConfig.Channel = ADC_CHANNEL_0;                      // 通道0（PA0）
+  sConfig.Rank = ADC_REGULAR_RANK_1;                    // 转换顺序：第1个
+  sConfig.SamplingTime = ADC_SAMPLETIME_55CYCLES_5;     // 采样时间：55.5周期
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC1_Init 2 */
+  /* USER CODE END ADC1_Init 2 */
 }
 
 /* USER CODE BEGIN 4 */
