@@ -1422,7 +1422,7 @@ uint8_t ESP_ConfigureMQTT(const char *client_id, const char *username, const cha
 uint8_t ESP_ConnectMQTT(const char *server, uint16_t port, uint8_t enable_ssl)
 {
   char cmd[128];
-  char debug_msg[128];
+  char debug_msg[256];
   
   DEBUG_SendString("\r\n=== MQTT Connection ===\r\n");
   
@@ -1436,7 +1436,18 @@ uint8_t ESP_ConnectMQTT(const char *server, uint16_t port, uint8_t enable_ssl)
   DEBUG_SendString(debug_msg);
   snprintf(debug_msg, sizeof(debug_msg), "SSL: %s\r\n", enable_ssl ? "Enabled" : "Disabled");
   DEBUG_SendString(debug_msg);
+  snprintf(debug_msg, sizeof(debug_msg), "Command: %s", cmd);
+  DEBUG_SendString(debug_msg);
+  
+  /* 注意：不要在这里调用AT+MQTTCLEAN，因为它可能会清除MQTT配置 */
+  /* AT+MQTTCLEAN已经在ESP_ConfigureMQTT中调用过了 */
+  
   DEBUG_SendString("Sending AT+MQTTCONN command...\r\n");
+  
+  /* 清空接收缓冲区 */
+  esp_response_ready = 0;
+  memset(esp_rx_buffer, 0, sizeof(esp_rx_buffer));
+  esp_rx_index = 0;
   
   /* 发送连接指令 */
   ESP_SendATCommand(cmd, 1000);
@@ -1445,38 +1456,64 @@ uint8_t ESP_ConnectMQTT(const char *server, uint16_t port, uint8_t enable_ssl)
   /* 某些ESP固件版本在MQTT连接后只返回CONNECT，不返回OK */
   uint32_t start_time = HAL_GetTick();
   uint8_t got_connect = 0;
+  uint8_t got_error = 0;
+  uint8_t response_count = 0;
   
   /* 最多等待20秒（MQTT连接可能需要更长时间） */
   while(HAL_GetTick() - start_time < 20000)
   {
     if(esp_response_ready)
     {
+      response_count++;
+      
+      /* 打印响应（限制长度） */
+      if(response_count <= 10)  /* 打印前10个响应以便调试 */
+      {
+        int resp_len = strlen((char*)esp_rx_buffer);
+        if(resp_len > 100) resp_len = 100;
+        snprintf(debug_msg, sizeof(debug_msg), "[Response #%d]: %.*s\r\n", 
+                 response_count, resp_len, (char*)esp_rx_buffer);
+        DEBUG_SendString(debug_msg);
+      }
+      
       /* 检查是否收到CONNECT */
       if(strstr((char*)esp_rx_buffer, "CONNECT") != NULL)
       {
         got_connect = 1;
-        DEBUG_SendString("[Stage 1/1] CONNECT received\r\n");
+        DEBUG_SendString("[OK] MQTT CONNECT received!\r\n");
       }
       
       /* 检查是否收到ERROR */
       if(strstr((char*)esp_rx_buffer, "ERROR") != NULL)
       {
-        if(!got_connect)
-        {
-          DEBUG_SendString("[ERROR] MQTT connection failed\r\n");
-          DEBUG_SendString("=== MQTT Connection Failed ===\r\n\r\n");
-          return ESP_ERROR;
-        }
+        got_error = 1;
+        DEBUG_SendString("[WARN] Received ERROR response\r\n");
+        snprintf(debug_msg, sizeof(debug_msg), "Error details: %s\r\n", esp_rx_buffer);
+        DEBUG_SendString(debug_msg);
+      }
+      
+      /* 检查是否收到OK（某些固件版本会返回OK） */
+      if(strstr((char*)esp_rx_buffer, "OK") != NULL && got_connect)
+      {
+        DEBUG_SendString("[OK] Connection confirmed with OK\r\n");
       }
       
       /* 连接成功的判断条件：收到CONNECT */
-      /* 某些ESP固件版本只发送CONNECT，不发送OK，所以CONNECT即可认为连接成功 */
       if(got_connect)
       {
         DEBUG_SendString("\r\n*** MQTT Connection Successful! ***\r\n");
         DEBUG_SendString("=== MQTT Connection Complete ===\r\n\r\n");
         esp_status.tcp_connected = 1;
+        esp_response_ready = 0;
         return ESP_OK;
+      }
+      
+      /* 如果收到ERROR且没有CONNECT，立即判定失败（因为已经移除了MQTTCLEAN，所以ERROR肯定是MQTTCONN的） */
+      if(got_error && !got_connect)
+      {
+        DEBUG_SendString("=== MQTT Connection Failed ===\r\n\r\n");
+        esp_response_ready = 0;
+        return ESP_ERROR;
       }
       
       esp_response_ready = 0;
@@ -1486,16 +1523,23 @@ uint8_t ESP_ConnectMQTT(const char *server, uint16_t port, uint8_t enable_ssl)
   
   /* 超时检查 */
   DEBUG_SendString("\r\n[TIMEOUT] 20 seconds elapsed\r\n");
+  snprintf(debug_msg, sizeof(debug_msg), "Total responses received: %d\r\n", response_count);
+  DEBUG_SendString(debug_msg);
+  
   if(got_connect)
   {
-    /* 虽然超时了，但收到了连接消息 */
-    DEBUG_SendString("[INFO] Connection indicators received, treating as success\r\n");
+    DEBUG_SendString("[INFO] Connection successful\r\n");
     esp_status.tcp_connected = 1;
     return ESP_OK;
   }
   else
   {
-    DEBUG_SendString("[ERROR] No connection response received\r\n");
+    DEBUG_SendString("[ERROR] No valid connection response received\r\n");
+    DEBUG_SendString("Possible issues:\r\n");
+    DEBUG_SendString("  1. Server unreachable\r\n");
+    DEBUG_SendString("  2. Port blocked or wrong\r\n");
+    DEBUG_SendString("  3. ESP-01S firmware doesn't support MQTT\r\n");
+    DEBUG_SendString("  4. WiFi connection lost\r\n");
     DEBUG_SendString("=== MQTT Connection Failed ===\r\n\r\n");
     return ESP_ERROR;
   }
@@ -1762,6 +1806,44 @@ uint8_t ESP_SubscribeMQTT(const char *topic)
 }
 
 /**
+  * @brief 检查MQTT连接状态
+  * @retval ESP_OK: 已连接, ESP_ERROR: 未连接
+  */
+uint8_t ESP_CheckMQTTConnection(void)
+{
+  char cmd[] = "AT+MQTTCONN?\r\n";
+  
+  /* 清空接收缓冲区 */
+  esp_response_ready = 0;
+  memset(esp_rx_buffer, 0, sizeof(esp_rx_buffer));
+  esp_rx_index = 0;
+  
+  /* 发送查询命令 */
+  ESP_SendATCommand(cmd, 1000);
+  
+  /* 等待响应 */
+  uint32_t start_time = HAL_GetTick();
+  while(HAL_GetTick() - start_time < 2000)
+  {
+    if(esp_response_ready)
+    {
+      /* 检查是否已连接 (返回+MQTTCONN:0,1...) */
+      if(strstr((char*)esp_rx_buffer, "+MQTTCONN:0,1") != NULL ||
+         strstr((char*)esp_rx_buffer, "+MQTTCONN:0,2") != NULL ||
+         strstr((char*)esp_rx_buffer, "+MQTTCONN:0,3") != NULL)
+      {
+        esp_response_ready = 0;
+        return ESP_OK;  // 已连接
+      }
+      esp_response_ready = 0;
+    }
+    ESP_DELAY(50);
+  }
+  
+  return ESP_ERROR;  // 未连接
+}
+
+/**
   * @brief 发布MQTT消息
   * @param topic: 发布消息的主题名称
   * @param message: 要发布的消息内容
@@ -1783,20 +1865,42 @@ uint8_t ESP_PublishMQTT(const char *topic, const char *message)
   
   DEBUG_SendString("\r\n=== MQTT Publish ===\r\n");
   
-  /* 构建发布指令 - AT+MQTTPUB=0,"topic","message",1,0 */
-  snprintf(cmd, sizeof(cmd), "AT+MQTTPUB=0,\"%s\",\"%s\",1,0\r\n", topic, message);
+  /* 移除主动检查，直接尝试发布，根据发布结果判断连接状态 */
+  /* 这样可以避免因查询指令响应解析失败而导致的误判 */
+  /*
+  DEBUG_SendString("Checking MQTT connection status...\r\n");
+  if(ESP_CheckMQTTConnection() != ESP_OK)
+  {
+    DEBUG_SendString("[ERROR] MQTT not connected! Cannot publish.\r\n");
+    DEBUG_SendString("=== MQTT Publish Failed ===\r\n\r\n");
+    return ESP_ERROR;
+  }
+  DEBUG_SendString("[OK] MQTT is connected\r\n");
+  */
+  
+  /* 构建发布指令 - AT+MQTTPUB=0,"topic","message",0,0 (QoS改为0) */
+  snprintf(cmd, sizeof(cmd), "AT+MQTTPUB=0,\"%s\",\"%s\",0,0\r\n", topic, message);
   
   /* 打印发布信息 */
   snprintf(debug_msg, sizeof(debug_msg), "Topic: %s\r\n", topic);
   DEBUG_SendString(debug_msg);
   snprintf(debug_msg, sizeof(debug_msg), "Message: %s\r\n", message);
   DEBUG_SendString(debug_msg);
-  snprintf(debug_msg, sizeof(debug_msg), "QoS: 1, Retain: 0\r\n");
+  snprintf(debug_msg, sizeof(debug_msg), "QoS: 0, Retain: 0\r\n");
+  DEBUG_SendString(debug_msg);
+  
+  /* 打印完整的AT命令 */
+  snprintf(debug_msg, sizeof(debug_msg), "Command: %s", cmd);
   DEBUG_SendString(debug_msg);
   DEBUG_SendString("Sending AT+MQTTPUB command...\r\n");
   
+  /* 清空之前的响应 */
+  esp_response_ready = 0;
+  memset(esp_rx_buffer, 0, sizeof(esp_rx_buffer));
+  esp_rx_index = 0;
+  
   /* 发送发布指令 */
-  ESP_SendATCommand(cmd, 1000);
+  ESP_SendATCommand(cmd, 2000);
   
   /* 等待发布结果 - 发布通常很快，几秒内完成 */
   uint32_t start_time = HAL_GetTick();
@@ -1833,6 +1937,9 @@ uint8_t ESP_PublishMQTT(const char *topic, const char *message)
         if(!got_ok)
         {
           DEBUG_SendString("[ERROR] Publish failed\r\n");
+          /* 打印ESP返回的错误信息 */
+          snprintf(debug_msg, sizeof(debug_msg), "ESP Response: %s\r\n", esp_rx_buffer);
+          DEBUG_SendString(debug_msg);
           DEBUG_SendString("=== MQTT Publish Failed ===\r\n\r\n");
           esp_response_ready = 0;
           return ESP_ERROR;

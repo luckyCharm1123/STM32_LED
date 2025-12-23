@@ -605,13 +605,23 @@ int main(void)
         DEBUG_SendString(temp_str);  // 发送到调试串口USART1
         USART2_SendString(temp_str); // 发送到主串口USART2
         
-        /* 发布到MQTT */
+        /* 发布到MQTT - 使用下划线分隔格式 */
         char mqtt_payload[80];
         snprintf(mqtt_payload, sizeof(mqtt_payload), 
-                 "{\"temp\":%d.%02d,\"humi\":%d.%02d}", 
+                 "temp%d%02d_humi%d%02d", 
                  temp_int, temp_dec, humi_int, humi_dec);
-        ESP_PublishMQTT("sensor/sht30", mqtt_payload);
-        DEBUG_SendString("[MQTT] Published SHT30 data\r\n");
+        
+        HAL_Delay(100);  // 短暂延时，确保MQTT稳定
+        
+        /* 直接发布，避免频繁检查连接状态 */
+        if(ESP_PublishMQTT(MQTT_PUBLISH_TOPIC, mqtt_payload) == ESP_OK)
+        {
+          DEBUG_SendString("[SUCCESS] SHT30 data published to MQTT\r\n");
+        }
+        else
+        {
+          DEBUG_SendString("[WARN] SHT30 MQTT publish failed\r\n");
+        }
       }
       
       sht30_last_read_time = HAL_GetTick();
@@ -648,15 +658,23 @@ int main(void)
         DEBUG_SendString(rain_str);
         USART2_SendString(rain_str);
         
-        /* 发布到MQTT */
+        /* 发布到MQTT - 使用简短格式避免消息过长 */
         char mqtt_payload[100];
         snprintf(mqtt_payload, sizeof(mqtt_payload), 
-                 "{\"adc\":%lu,\"voltage\":%d.%02d,\"dry\":%lu,\"wet\":%lu}", 
-                 adc_value,
-                 (int)voltage, (int)((voltage - (int)voltage) * 100),
-                 dry_percent, wet_percent);
-        ESP_PublishMQTT("sensor/rain", mqtt_payload);
-        DEBUG_SendString("[MQTT] Published rain sensor data\r\n");
+                 "rain_adc%lu_wet%lu", 
+                 adc_value, wet_percent);
+        
+        HAL_Delay(100);  // 短暂延时，确保MQTT稳定
+        
+        /* 直接发布，避免频繁检查连接状态 */
+        if(ESP_PublishMQTT(MQTT_PUBLISH_TOPIC, mqtt_payload) == ESP_OK)
+        {
+          DEBUG_SendString("[SUCCESS] Rain sensor data published to MQTT\r\n");
+        }
+        else
+        {
+          DEBUG_SendString("[WARN] Rain MQTT publish failed\r\n");
+        }
       }
       
       /* 停止ADC转换 */

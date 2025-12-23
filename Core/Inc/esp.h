@@ -166,6 +166,12 @@ uint8_t ESP_ConfigureMQTT(const char *client_id, const char *username, const cha
 uint8_t ESP_ConnectMQTT(const char *server, uint16_t port, uint8_t enable_ssl);
 
 /**
+  * @brief 检查MQTT连接状态
+  * @retval ESP_OK: 已连接, ESP_ERROR: 未连接
+  */
+uint8_t ESP_CheckMQTTConnection(void);
+
+/**
   * @brief 订阅MQTT主题
   * @param topic: 要订阅的主题名称
   * @retval ESP_OK: 成功, ESP_ERROR: 失败
