@@ -572,10 +572,10 @@ int main(void)
   
   /* 雨水传感器读取控制变量 */
   uint32_t rain_last_read_time = HAL_GetTick();
-  uint32_t rain_read_interval = 2000;  // 雨水传感器读取间隔（2秒）
+  uint32_t rain_read_interval = 10000;  // 雨水传感器读取间隔（10秒）
   
   DEBUG_SendString("[INFO] SHT30 reading interval: 10 seconds\r\n");
-  DEBUG_SendString("[INFO] Rain sensor reading interval: 2 seconds (PA0/ADC1_CH0)\r\n");
+  DEBUG_SendString("[INFO] Rain sensor reading interval: 10 seconds (PA0/ADC1_CH0)\r\n");
   USART2_SendString("[INFO] SHT30 will output every 10 seconds\r\n");
   
   while (1)
@@ -604,12 +604,20 @@ int main(void)
                  temp_int, temp_dec, humi_int, humi_dec);
         DEBUG_SendString(temp_str);  // 发送到调试串口USART1
         USART2_SendString(temp_str); // 发送到主串口USART2
+        
+        /* 发布到MQTT */
+        char mqtt_payload[80];
+        snprintf(mqtt_payload, sizeof(mqtt_payload), 
+                 "{\"temp\":%d.%02d,\"humi\":%d.%02d}", 
+                 temp_int, temp_dec, humi_int, humi_dec);
+        ESP_PublishMQTT("sensor/sht30", mqtt_payload);
+        DEBUG_SendString("[MQTT] Published SHT30 data\r\n");
       }
       
       sht30_last_read_time = HAL_GetTick();
     }
     
-    /* 雨水传感器读取 - 每2秒读取一次（ADC） */
+    /* 雨水传感器读取 - 每10秒读取一次（ADC） */
     if(HAL_GetTick() - rain_last_read_time >= rain_read_interval)
     {
       /* 启动ADC转换 */
@@ -639,6 +647,16 @@ int main(void)
                  dry_percent, wet_percent);
         DEBUG_SendString(rain_str);
         USART2_SendString(rain_str);
+        
+        /* 发布到MQTT */
+        char mqtt_payload[100];
+        snprintf(mqtt_payload, sizeof(mqtt_payload), 
+                 "{\"adc\":%lu,\"voltage\":%d.%02d,\"dry\":%lu,\"wet\":%lu}", 
+                 adc_value,
+                 (int)voltage, (int)((voltage - (int)voltage) * 100),
+                 dry_percent, wet_percent);
+        ESP_PublishMQTT("sensor/rain", mqtt_payload);
+        DEBUG_SendString("[MQTT] Published rain sensor data\r\n");
       }
       
       /* 停止ADC转换 */
