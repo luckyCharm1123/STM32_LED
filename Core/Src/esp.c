@@ -1866,6 +1866,11 @@ uint8_t ESP_PublishMQTT(const char *topic, const char *message)
   memset(esp_rx_buffer, 0, sizeof(esp_rx_buffer));
   esp_rx_index = 0;
   
+  /* 打印发送的命令到调试串口 */
+  char debug_msg[512];
+  snprintf(debug_msg, sizeof(debug_msg), "[MQTT] Sending: %s", cmd);
+  DEBUG_SendString(debug_msg);
+  
   /* 发送发布指令 */
   ESP_SendATCommand(cmd, 2000);
   
@@ -1873,6 +1878,7 @@ uint8_t ESP_PublishMQTT(const char *topic, const char *message)
   uint32_t start_time = HAL_GetTick();
   uint8_t got_ok = 0;
   uint8_t got_send_ok = 0;
+  uint8_t got_error = 0;
   uint8_t response_count = 0;
   
   /* 最多等待8秒 */
@@ -1902,6 +1908,25 @@ uint8_t ESP_PublishMQTT(const char *topic, const char *message)
                  response_count, local_buffer);
       }
       DEBUG_SendString(debug_msg);
+      
+      /* 检查是否收到真正的ERROR响应 */
+      /* 注意：命令回显可能包含"AT+MQTTPUB"，这不是ERROR */
+      if(strstr(local_buffer, "ERROR") != NULL)
+      {
+        /* 排除命令回显的情况 - 回显通常以"AT+"开头 */
+        if(strstr(local_buffer, "AT+") == NULL)
+        {
+          /* 这不是回显，是真正的ERROR */
+          if(strstr(local_buffer, "OK") == NULL && strstr(local_buffer, "SEND OK") == NULL)
+          {
+            got_error = 1;
+            DEBUG_SendString("[ERROR] MQTT publish failed - received ERROR\r\n");
+            DEBUG_SendString("=== MQTT Publish Failed ===\r\n\r\n");
+            return ESP_ERROR;
+          }
+        }
+        /* 如果是命令回显+ERROR的情况，忽略这个ERROR判断 */
+      }
       
       /* 检查是否收到OK */
       if(strstr(local_buffer, "OK") != NULL)
@@ -1943,8 +1968,24 @@ uint8_t ESP_PublishMQTT(const char *topic, const char *message)
                        response_count, extra_buffer);
             }
             DEBUG_SendString(debug_msg);
+            
+            /* 在额外等待期间也检查ERROR */
+            if(strstr(extra_buffer, "ERROR") != NULL && 
+               strstr(extra_buffer, "OK") == NULL && 
+               strstr(extra_buffer, "SEND OK") == NULL)
+            {
+              got_error = 1;
+            }
           }
           HAL_Delay(10);
+        }
+        
+        /* 如果在额外等待期间收到了ERROR，失败 */
+        if(got_error)
+        {
+          DEBUG_SendString("[ERROR] MQTT publish failed - received ERROR after OK\r\n");
+          DEBUG_SendString("=== MQTT Publish Failed ===\r\n\r\n");
+          return ESP_ERROR;
         }
         
         DEBUG_SendString("[OK] Message published successfully\r\n");
