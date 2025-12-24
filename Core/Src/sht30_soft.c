@@ -357,25 +357,4 @@ uint8_t SHT30_Soft_Read(float *temp, float *humi)
   }
 }
 
-/**
-  * @brief SHT30测试函数 - 用于调试I2C通信
-  */
-void SHT30_Soft_Test(void)
-{
-  uint8_t ack_result;
-  
-  // 测试1: 检查设备应答
-  SHT30_IIC_Start();
-  SHT30_IIC_Write_Byte(SHT30_ADDR + 0);  // 写地址
-  ack_result = SHT30_IIC_Wait_Ack();
-  SHT30_IIC_Stop();
-  
-  if(ack_result)
-  {
-    // 找到设备
-  }
-  else
-  {
-    // 没有找到设备
-  }
-}
+

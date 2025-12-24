@@ -85,7 +85,6 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* 私有变量 */
-// I2C_HandleTypeDef hi2c1;    // 已不需要（改用软件I2C）
 ADC_HandleTypeDef hadc1;    // ADC1句柄，用于雨水传感器（PA0）
 UART_HandleTypeDef huart1;  // USART1句柄，用于调试输出（PA9/PA10，115200）
 UART_HandleTypeDef huart2;  // USART2句柄，用于管理串口2的所有操作
@@ -99,10 +98,6 @@ uint8_t tx_buffer[TX_BUFFER_SIZE];  // 发送缓冲区，预留用于复杂发�
 uint16_t rx_index = 0;              // 接收索引，指示当前接收数据在缓冲区中的位置
 uint8_t rx_complete = 0;            // 接收完成标志，0=正在接收，1=接收完成等待处理
 
-/* ESP模式控制变量 */
-uint8_t esp_mode = 0;               // ESP模式标志，用于切换接收处理逻辑
-                                    // 0 = 用户命令模式（处理用户输入的控制命令）
-                                    // 1 = ESP数据模式（直接接收ESP模块的响应数据）
 
 /* ESP相关外部变量声明（在esp.c中定义） */
 extern uint8_t esp_rx_buffer[512];  // ESP接收缓冲区，用于存储ESP模块返回的原始数据
@@ -115,7 +110,6 @@ extern uint32_t esp_last_rx_time;   // ESP最后接收时间戳
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);  // 系统时钟配置函数声明
 static void MX_GPIO_Init(void); // GPIO初始化函数声明（静态函数，仅在本文件内可见）
-// static void MX_I2C1_Init(void); // 已不需要（改用软件I2C）
 static void MX_ADC1_Init(void); // ADC1初始化函数声明（雨水传感器）
 static void MX_USART1_UART_Init(void); // USART1初始化函数声明（调试串口）
 static void MX_USART2_UART_Init(void); // USART2初始化函数声明
@@ -180,91 +174,6 @@ void DEBUG_SendString(char *str)
   HAL_UART_Transmit(&huart1, (uint8_t*)str, strlen(str), HAL_MAX_DELAY);
 }
 
-/**
-  * @brief 处理接收到的数据
-  * @param None
-  * @retval None
-  * @details 这是主循环中调用的核心处理函数
-  *          当接收到完整命令后，解析并执行相应操作
-  *          支持的命令包括：LED控制命令和系统信息查询
-  */
-void Process_Received_Data(void)
-{
-  // 检查接收完成标志
-  if(rx_complete)
-  {
-    // 回显接收到的数据，让用户看到自己输入的内容
-    USART2_SendString("\r\nReceived: ");
-    HAL_UART_Transmit(&huart2, rx_buffer, rx_index, HAL_MAX_DELAY);
-    USART2_SendString("\r\n");
-    
-    // 简单的命令处理 - 使用strncmp进行字符串比较
-    // strncmp比较前n个字符，防止缓冲区溢出
-    
-    // 检查LED_ON命令 - 打开LED
-    // 用法：在串口输入"LED_ON"
-    if(strncmp((char*)rx_buffer, "LED_ON", 6) == 0)
-    {
-      HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);  // 设置LED引脚为高电平（点亮）
-      USART2_SendString("LED turned ON\r\n");
-    }
-    
-    // 检查LED_OFF命令 - 关闭LED
-    // 用法：在串口输入"LED_OFF"
-    else if(strncmp((char*)rx_buffer, "LED_OFF", 7) == 0)
-    {
-      HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);  // 设置LED引脚为低电平（熄灭）
-      USART2_SendString("LED turned OFF\r\n");
-    }
-    
-    // 检查LED_TOGGLE命令 - 翻转LED状态
-    // 用法：在串口输入"LED_TOGGLE"
-    else if(strncmp((char*)rx_buffer, "LED_TOGGLE", 10) == 0)
-    {
-      HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);  // 翻转LED引脚电平
-      USART2_SendString("LED toggled\r\n");
-    }
-    
-    // 检查STATUS命令 - 显示系统状态
-    // 用法：输入"STATUS"
-    else if(strncmp((char*)rx_buffer, "STATUS", 6) == 0)
-    {
-      USART2_SendString("=== System Status ===\r\n");
-      USART2_SendString("STM32F103xB - USART2 Demo\r\n");
-      USART2_SendString("Baud Rate: 115200\r\n");
-      USART2_SendString("LED: PA5 (or user LED)\r\n");
-      USART2_SendString("Commands: LED_ON, LED_OFF, LED_TOGGLE, STATUS, HELP\r\n");
-    }
-    
-    // 检查HELP命令 - 显示帮助信息
-    // 用法：输入"HELP"
-    else if(strncmp((char*)rx_buffer, "HELP", 4) == 0)
-    {
-      USART2_SendString("=== Available Commands ===\r\n");
-      USART2_SendString("LED_ON      - Turn on LED\r\n");
-      USART2_SendString("LED_OFF     - Turn off LED\r\n");
-      USART2_SendString("LED_TOGGLE  - Toggle LED state\r\n");
-      USART2_SendString("STATUS      - Show system status\r\n");
-      USART2_SendString("HELP        - Show this help message\r\n");
-    }
-    
-    // 未知命令处理
-    // 当用户输入不支持的命令时，显示可用命令列表
-    else
-    {
-      USART2_SendString("Unknown command. Type HELP for available commands.\r\n");
-    }
-    
-    // 重置接收状态，为下一次接收做准备
-    rx_index = 0;              // 重置索引
-    rx_complete = 0;           // 清除完成标志
-    memset(rx_buffer, 0, RX_BUFFER_SIZE);  // 清空接收缓冲区
-    
-    // 重新启动串口接收中断，准备接收下一个命令
-    HAL_UART_Receive_IT(&huart2, &rx_buffer[rx_index], 1);
-  }
-}
-
 /* USER CODE END 0 */
 
 /**
@@ -321,57 +230,8 @@ int main(void)
   MX_USART1_UART_Init();       // 初始化USART1（调试串口）
   MX_USART2_UART_Init();       // 初始化USART2（串口）
   
-  /* 用户代码开始：第2区 */
-  /* 设置为ESP模式，避免触发用户命令处理逻辑 */
-  esp_mode = 1;
-  
-  /* 信息缓冲区 */
-  char info_buffer[100];
-  
-  /* 发送调试信息到USART1（调试串口） */
-  DEBUG_SendString("\r\n=== STM32F103 Debug Port (USART1) ===\r\n");
-  DEBUG_SendString("Port: PA9(TX) / PA10(RX)\r\n");
-  DEBUG_SendString("Baud: 115200 8N1\r\n");
-  DEBUG_SendString("System starting...\r\n\r\n");
-  
-  /* 初始化SHT30温湿度传感器（软件I2C版本） */
-  DEBUG_SendString("=== SHT30 Sensor Initialization (Software I2C) ===\r\n");
-  DEBUG_SendString("Using GPIO simulation I2C - No pull-up resistors needed!\r\n");
-  DEBUG_SendString("Pins: PB6=SCL, PB7=SDA\r\n");
-  DEBUG_SendString("I2C Address: 0x88 (0x44<<1, write mode)\r\n\r\n");
-  
   SHT30_Soft_Init();  // 初始化软件I2C
-  HAL_Delay(200);
-  
-  DEBUG_SendString("Testing I2C communication...\r\n");
-  SHT30_Soft_Test();  // 测试I2C通信
-  
-  DEBUG_SendString("\r\nReading sensor data...\r\n");
-  float test_temp, test_humi;
-  uint8_t read_result = SHT30_Soft_Read(&test_temp, &test_humi);
-  
-  /* 转换为整数输出 */
-  int temp_int = (int)test_temp;
-  int temp_dec = (int)((test_temp - temp_int) * 100);
-  int humi_int = (int)test_humi;
-  int humi_dec = (int)((test_humi - humi_int) * 100);
-  
-  if(read_result == 0)
-  {
-    snprintf(info_buffer, sizeof(info_buffer), "[OK] SHT30 initialized! Temp: %d.%02d°C, Humi: %d.%02d%%\r\n", 
-             temp_int, temp_dec, humi_int, humi_dec);
-    DEBUG_SendString(info_buffer);
-    USART2_SendString("[INFO] SHT30 sensor ready\r\n");
-  }
-  else
-  {
-    snprintf(info_buffer, sizeof(info_buffer), "[WARN] CRC failed, but got data: Temp: %d.%02d°C, Humi: %d.%02d%%\r\n", 
-             temp_int, temp_dec, humi_int, humi_dec);
-    DEBUG_SendString(info_buffer);
-    USART2_SendString("[WARN] SHT30 CRC error\r\n");
-  }
-  
-  DEBUG_SendString("=== SHT30 Initialization Complete ===\r\n\r\n");
+  HAL_Delay(10);
   
   /* 启动串口接收中断，用于接收ESP模块的响应 */
   HAL_UART_Receive_IT(&huart2, &rx_buffer[0], 1);
@@ -1040,14 +900,9 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   // 检查是否是USART2的中断
   if(huart->Instance == USART2)
   {
-      // ==================== ESP数据模式处理 ====================
-      // 当esp_mode=1时，处于ESP模块数据接收状态
-      // 此时直接将接收到的数据传递给ESP驱动层处理
-      if(esp_mode)
-      {
-        // 更新最后接收时间戳（用于超时检测）
-        esp_last_rx_time = HAL_GetTick();
-        
+      // 更新最后接收时间戳（用于超时检测）
+      esp_last_rx_time = HAL_GetTick();
+      
       // 检查是否收到换行符或回车符，表示ESP模块的一行响应结束
       if(rx_buffer[0] == '\r' || rx_buffer[0] == '\n')
       {
@@ -1080,50 +935,10 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
           esp_rx_index = 0;
         }
       }
-        
-        // 继续接收下一个字节（ESP模式）
-        HAL_UART_Receive_IT(&huart2, &rx_buffer[0], 1);
-      }
-    // ==================== 用户命令模式处理 ====================
-    // 当esp_mode=0时，处于用户命令接收状态
-    // 此时接收用户通过串口输入的控制命令
-    else
-    {
-      // 检查是否收到换行符或回车符，表示用户命令结束
-      if(rx_buffer[rx_index] == '\r' || rx_buffer[rx_index] == '\n')
-      {
-        // 只有当缓冲区有数据时才处理
-        if(rx_index > 0)
-        {
-          // 添加字符串结束符，使字符串处理函数能正确解析命令
-          rx_buffer[rx_index] = '\0';
-          // 设置接收完成标志，主循环中的Process_Received_Data()会处理这个命令
-          rx_complete = 1;
-          // 注意：不在此处重启接收，由Process_Received_Data()处理完后重启
-          // 这样可以确保命令处理完成后再准备接收下一个命令
-        }
-        else
-        {
-          // 收到空行（只有回车/换行），直接丢弃，继续接收下一个字节
-          HAL_UART_Receive_IT(&huart2, &rx_buffer[rx_index], 1);
-        }
-      }
-      // 检查缓冲区是否还有空间继续接收
-      else if(rx_index < RX_BUFFER_SIZE - 1)
-      {
-        // 索引递增，准备接收下一个字符
-        rx_index++;
-        // 继续接收下一个字节
-        HAL_UART_Receive_IT(&huart2, &rx_buffer[rx_index], 1);
-      }
-      else
-      {
-        // 缓冲区满，重置索引，避免溢出
-        // 这种情况下丢弃之前的数据，重新开始接收
-        rx_index = 0;
-        HAL_UART_Receive_IT(&huart2, &rx_buffer[rx_index], 1);
-      }
-    }
+      
+      // 继续接收下一个字节（ESP模式）
+      HAL_UART_Receive_IT(&huart2, &rx_buffer[0], 1);
+    
   }
 }
 
