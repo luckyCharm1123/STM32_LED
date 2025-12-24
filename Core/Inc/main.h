@@ -53,7 +53,9 @@ extern "C" {
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-
+int _write(int file, char *ptr, int len);
+void DEBUG_SendString(const char *str);
+void USART2_SendString(const char *str);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/

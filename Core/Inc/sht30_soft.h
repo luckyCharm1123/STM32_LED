@@ -37,6 +37,5 @@
 /* 函数声明 */
 void SHT30_Soft_Init(void);
 uint8_t SHT30_Soft_Read(float *temp, float *humi);
-void SHT30_Soft_Test(void);  // 添加测试函数
 
 #endif /* __SHT30_SOFT_H */

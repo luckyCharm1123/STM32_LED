@@ -200,6 +200,29 @@ uint8_t ESP_SubscribeMQTT(const char *topic);
   */
 uint8_t ESP_PublishMQTT(const char *topic, const char *message);
 
+/**
+  * @brief WiFi和MQTT连接封装函数
+  * @param wifi_ssid: WiFi名称
+  * @param wifi_password: WiFi密码
+  * @param mqtt_client_id: MQTT客户端ID
+  * @param mqtt_username: MQTT用户名
+  * @param mqtt_password: MQTT密码
+  * @param mqtt_server: MQTT服务器地址
+  * @param mqtt_port: MQTT服务器端口
+  * @param mqtt_ssl: SSL标志 (0=不启用, 1=启用)
+  * @param mqtt_subscribe_topic: 订阅的主题（如果为NULL则不订阅）
+  * @param mqtt_publish_topic: 发布的主题（如果为NULL则不发布）
+  * @param mqtt_publish_message: 发布的消息（如果为NULL则不发布）
+  * @retval ESP_OK: 成功, ESP_ERROR: 失败
+  * @details 整合了WiFi连接、IP查询、MQTT配置、连接、订阅和发布的完整流程
+  *          简化main.c中的代码，避免重复逻辑
+  */
+uint8_t ESP_ConnectWiFiAndMQTT(const char *wifi_ssid, const char *wifi_password,
+                                const char *mqtt_client_id, const char *mqtt_username, const char *mqtt_password,
+                                const char *mqtt_server, uint16_t mqtt_port, uint8_t mqtt_ssl,
+                                const char *mqtt_subscribe_topic,
+                                const char *mqtt_publish_topic, const char *mqtt_publish_message);
+
 /* USER CODE END EFP */
 
 #ifdef __cplusplus
