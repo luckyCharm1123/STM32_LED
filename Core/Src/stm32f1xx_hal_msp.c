@@ -212,8 +212,44 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart)
     HAL_NVIC_EnableIRQ(USART2_IRQn);                // 使能USART2中断
     
     /* USER CODE BEGIN USART2_MspInit 1 */
-    
+
     /* USER CODE END USART2_MspInit 1 */
+  }
+  else if(huart->Instance == USART3)
+  {
+    /* USER CODE BEGIN USART3_MspInit 0 */
+
+    /* USER CODE END USART3_MspInit 0 */
+
+    /* Peripheral clock enable */
+    __HAL_RCC_USART3_CLK_ENABLE();  // 使能USART3时钟
+
+    /* USART3 GPIO Configuration
+    PB10     ------> USART3_TX
+    PB11     ------> USART3_RX
+    */
+    __HAL_RCC_GPIOB_CLK_ENABLE();  // 使能GPIOB时钟
+
+    /* 配置USART3_TX引脚 (PB10) */
+    GPIO_InitStruct.Pin = GPIO_PIN_10;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;          // 复用推挽输出
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;    // 高速模式
+    GPIO_InitStruct.Pull = GPIO_NOPULL;              // 无上下拉
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    /* 配置USART3_RX引脚 (PB11) */
+    GPIO_InitStruct.Pin = GPIO_PIN_11;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_INPUT;       // 复用输入模式
+    GPIO_InitStruct.Pull = GPIO_NOPULL;              // 无上下拉
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    /* USART3中断配置 */
+    HAL_NVIC_SetPriority(USART3_IRQn, 0, 1);         // 设置中断优先级
+    HAL_NVIC_EnableIRQ(USART3_IRQn);                // 使能USART3中断
+
+    /* USER CODE BEGIN USART3_MspInit 1 */
+
+    /* USER CODE END USART3_MspInit 1 */
   }
 }
 

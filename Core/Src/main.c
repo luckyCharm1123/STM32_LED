@@ -42,6 +42,7 @@
 #include <stdlib.h> // 用于atoi函数，字符串转整数
 #include "esp.h"    // ESP-01S模块驱动
 #include "sht30_soft.h"  // SHT30温湿度传感器驱动（软件I2C版本）
+#include "radar.h"  // 毫米波雷达驱动
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -62,7 +63,7 @@
 #define WIFI_PASSWORD "qjdq1901"  // WiFi密码
 
 /* MQTT配置 */
-#define MQTT_CLIENT_ID "kaiyueT01"  // MQTT客户端ID
+#define MQTT_CLIENT_ID "diantiT01"  // MQTT客户端ID
 #define MQTT_USERNAME  "test"       // MQTT用户名
 #define MQTT_PASSWORD  "supertest"  // MQTT密码
 
@@ -72,8 +73,8 @@
 #define MQTT_SSL       0                  // SSL标志 (0=不启用, 1=启用)
 
 /* MQTT主题和消息配置 */
-#define MQTT_SUBSCRIBE_TOPIC  "testtopic1"  // 订阅的主题
-#define MQTT_PUBLISH_TOPIC   "kaiyueTopic"  // 发布的主题
+#define MQTT_SUBSCRIBE_TOPIC  "testtopic2"  // 订阅的主题
+#define MQTT_PUBLISH_TOPIC   "diantiTopic"  // 发布的主题
 #define MQTT_PUBLISH_MESSAGE "hello"        // 发布的消息内容
 
 /* Flash配置存储 - 使用最后一页(Page 63, 1KB) */
@@ -100,6 +101,7 @@ typedef struct {
 ADC_HandleTypeDef hadc1;    // ADC1句柄，用于雨水传感器（PA0）
 UART_HandleTypeDef huart1;  // USART1句柄，用于调试输出（PA9/PA10，115200）
 UART_HandleTypeDef huart2;  // USART2句柄，用于管理串口2的所有操作
+UART_HandleTypeDef huart3;  // USART3句柄，用于毫米波雷达通信（PB10/PB11，115200）
 
 /* USER CODE BEGIN PV */
 /* 用户代码开始：私有变量 */
@@ -108,6 +110,7 @@ UART_HandleTypeDef huart2;  // USART2句柄，用于管理串口2的所有操作
 uint8_t rx_buffer[1];  // 单字节接收缓冲区
 
 /* ESP相关外部变量声明（在esp.c中定义） */
+extern void ESP_SendATCommand(const char *cmd, uint32_t timeout);  // ESP发送AT命令函数
 extern uint8_t esp_rx_buffer[512];  // ESP接收缓冲区，用于存储ESP模块返回的原始数据
 extern uint8_t esp_rx_complete;     // ESP接收完成标志，当收到换行符时置1
 extern uint16_t esp_rx_index;       // ESP接收索引，指示当前ESP数据在缓冲区中的位置
@@ -128,6 +131,7 @@ static void MX_GPIO_Init(void); // GPIO初始化函数声明（静态函数，�
 static void MX_ADC1_Init(void); // ADC1初始化函数声明（雨水传感器）
 static void MX_USART1_UART_Init(void); // USART1初始化函数声明（调试串口）
 static void MX_USART2_UART_Init(void); // USART2初始化函数声明
+static void MX_USART3_UART_Init(void); // USART3初始化函数声明（雷达串口）
 
 /* USER CODE BEGIN PFP */
 /* 用户代码开始：私有函数原型 */
@@ -341,13 +345,59 @@ int main(void)
   MX_ADC1_Init();              // 初始化ADC1（雨水传感器，PA0）
   MX_USART1_UART_Init();       // 初始化USART1（调试串口）
   MX_USART2_UART_Init();       // 初始化USART2（串口）
+  MX_USART3_UART_Init();       // 初始化USART3（雷达串口）
   
   SHT30_Soft_Init();  // 初始化软件I2C
   HAL_Delay(10);
-  
+
+  /* 初始化雷达模块 */
+  if(RADAR_Init() == 0)
+  {
+    USART2_SendString("[OK] Radar initialized\r\n");
+  }
+  else
+  {
+    USART2_SendString("[ERR] Radar init failed\r\n");
+  }
+
   /* 启动串口接收中断，用于接收ESP模块的响应 */
   HAL_UART_Receive_IT(&huart2, &rx_buffer[0], 1);
-  
+
+  /* ESP硬件诊断 - 检查连接和响应 */
+  USART2_SendString("\r\n=== ESP Hardware Diagnostic ===\r\n");
+  USART2_SendString("Please verify:\r\n");
+  USART2_SendString("1. CH_PD pin connected to 3.3V\r\n");
+  USART2_SendString("2. VCC: 3.3V, GND: GND\r\n");
+  USART2_SendString("3. ESP-TX -> STM32-PA3, ESP-RX -> STM32-PA2\r\n");
+  USART2_SendString("4. GPIO0: floating or 3.3V (NOT grounded!)\r\n");
+  USART2_SendString("Waiting 3 seconds for ESP to boot...\r\n");
+
+  /* 等待3秒,给ESP足够的启动时间 */
+  HAL_Delay(3000);
+
+  /* 测试AT命令 */
+  USART2_SendString("Sending: AT\r\n");
+  ESP_SendATCommand("AT\r\n", 2000);
+  HAL_Delay(1000);
+
+  /* 检查是否有响应 */
+  if(esp_response_ready)
+  {
+    USART2_SendString("[OK] ESP is responding!\r\n");
+    USART2_SendString((char*)esp_rx_buffer);
+    USART2_SendString("\r\n");
+  }
+  else
+  {
+    USART2_SendString("[ERROR] ESP not responding!\r\n");
+    USART2_SendString("Please check:\r\n");
+    USART2_SendString("- Power: 3.3V, 500mA+\r\n");
+    USART2_SendString("- CH_PD connected to 3.3V\r\n");
+    USART2_SendString("- TX/RX not reversed\r\n");
+    USART2_SendString("- GPIO0 not grounded\r\n");
+    USART2_SendString("Continuing anyway...\r\n\r\n");
+  }
+
   /* 从Flash加载WiFi配置 */
   WiFiConfig_t saved_config;
   if(WiFiConfig_Load(&saved_config) == 0)
@@ -661,7 +711,10 @@ int main(void)
       
       sensor_last_read_time = HAL_GetTick();
     }
-    
+
+    /* 处理雷达数据 */
+    RADAR_Process();
+
     /* 短暂延时，避免CPU空转，但不阻塞ESP数据处理 */
     HAL_Delay(10);  // 10ms延时，确保ESP数据能及时处理
     
@@ -880,6 +933,52 @@ static void MX_USART2_UART_Init(void)
 }
 
 /**
+  * @brief USART3 Initialization Function USART3初始化函数
+  * @param None 无参数
+  * @retval None 无返回值
+  * @details 配置USART3串口参数：
+  *          - 波特率：115200
+  *          - 数据位：8位
+  *          - 停止位：1位
+  *          - 校验位：无
+  *          - 流控：无
+  *          - 模式：收发模式
+  *          - 引脚：TX=PB10, RX=PB11
+  * @note USART3挂载在APB1总线上，时钟频率为8MHz
+  *       用于毫米波雷达传感器通信
+  */
+static void MX_USART3_UART_Init(void)
+{
+  /* USER CODE BEGIN USART3_Init 0 */
+  /* 用户代码开始：USART3初始化第0区 */
+  /* USER CODE END USART3_Init 0 */
+
+  /* USER CODE BEGIN USART3_Init 1 */
+  /* 用户代码开始：USART3初始化第1区 */
+  /* USER CODE END USART3_Init 1 */
+
+  /* 配置USART3句柄参数 */
+  huart3.Instance = USART3;                      // USART3实例
+  huart3.Init.BaudRate = 115200;                 // 波特率：115200 (雷达模块)
+  huart3.Init.WordLength = UART_WORDLENGTH_8B;   // 数据位：8位
+  huart3.Init.StopBits = UART_STOPBITS_1;        // 停止位：1位
+  huart3.Init.Parity = UART_PARITY_NONE;         // 校验位：无
+  huart3.Init.Mode = UART_MODE_TX_RX;            // 模式：收发模式
+  huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;   // 硬件流控：无
+  huart3.Init.OverSampling = UART_OVERSAMPLING_16; // 过采样：16倍
+
+  /* 应用USART3配置 */
+  if (HAL_UART_Init(&huart3) != HAL_OK)
+  {
+    Error_Handler();  // 如果初始化失败，调用错误处理函数
+  }
+
+  /* USER CODE BEGIN USART3_Init 2 */
+  /* 用户代码开始：USART3初始化第2区 */
+  /* USER CODE END USART3_Init 2 */
+}
+
+/**
   * @brief GPIO Initialization Function GPIO初始化函数
   * @param None 无参数
   * @retval None 无返回值
@@ -1050,7 +1149,13 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
       
       // 继续接收下一个字节（ESP模式）
       HAL_UART_Receive_IT(&huart2, &rx_buffer[0], 1);
-    
+
+  }
+  // 检查是否是USART3的中断（雷达数据）
+  else if(huart->Instance == USART3)
+  {
+      // 调用雷达驱动的UART回调函数
+      RADAR_UART_RxCpltCallback(huart);
   }
 }
 
