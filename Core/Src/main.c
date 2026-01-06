@@ -40,9 +40,11 @@
 #include <stdio.h>  // 用于printf重定向，实现标准输出到串口
 #include <string.h> // 用于字符串操作，如strlen、strncmp、memset等
 #include <stdlib.h> // 用于atoi函数，字符串转整数
+#include <inttypes.h> // 用于PRIu32等格式化宏
 #include "esp.h"    // ESP-01S模块驱动
 #include "sht30_soft.h"  // SHT30温湿度传感器驱动（软件I2C版本）
 #include "radar.h"  // 毫米波雷达驱动
+#include "ir_sensor.h"  // 红外传感器驱动
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -73,8 +75,6 @@
 #define MQTT_SSL       0                  // SSL标志 (0=不启用, 1=启用)
 
 /* MQTT主题和消息配置 */
-#define MQTT_SUBSCRIBE_TOPIC  "testtopic2"  // 订阅的主题
-#define MQTT_PUBLISH_TOPIC   "diantiTopic"  // 发布的主题
 #define MQTT_PUBLISH_MESSAGE "hello"        // 发布的消息内容
 
 /* Flash配置存储 - 使用最后一页(Page 63, 1KB) */
@@ -98,7 +98,6 @@ typedef struct {
 
 /* Private variables ---------------------------------------------------------*/
 /* 私有变量 */
-ADC_HandleTypeDef hadc1;    // ADC1句柄，用于雨水传感器（PA0）
 UART_HandleTypeDef huart1;  // USART1句柄，用于调试输出（PA9/PA10，115200）
 UART_HandleTypeDef huart2;  // USART2句柄，用于管理串口2的所有操作
 UART_HandleTypeDef huart3;  // USART3句柄，用于毫米波雷达通信（PB10/PB11，115200）
@@ -110,12 +109,16 @@ UART_HandleTypeDef huart3;  // USART3句柄，用于毫米波雷达通信（PB10
 uint8_t rx_buffer[1];  // 单字节接收缓冲区
 
 /* ESP相关外部变量声明（在esp.c中定义） */
-extern void ESP_SendATCommand(const char *cmd, uint32_t timeout);  // ESP发送AT命令函数
-extern uint8_t esp_rx_buffer[512];  // ESP接收缓冲区，用于存储ESP模块返回的原始数据
-extern uint8_t esp_rx_complete;     // ESP接收完成标志，当收到换行符时置1
-extern uint16_t esp_rx_index;       // ESP接收索引，指示当前ESP数据在缓冲区中的位置
-extern uint8_t esp_response_ready;  // ESP响应就绪标志，表示ESP数据已准备好供驱动层处理
-extern uint32_t esp_last_rx_time;   // ESP最后接收时间戳
+extern char RxData[512];  // ESP接收缓冲区（从STM32-ESP01S移植）
+extern uint16_t DataPointer;  // ESP接收数据指针
+extern uint8_t CompeteRx;  // ESP接收完成标志
+
+/* ESP接收缓冲区（主循环使用） */
+extern uint8_t esp_rx_complete;     // ESP接收完成标志
+extern char esp_rx_buffer[];        // ESP接收缓冲区
+extern uint16_t esp_rx_index;       // ESP接收索引
+extern uint8_t esp_response_ready;  // ESP响应就绪标志
+extern uint32_t esp_last_rx_time;   // ESP最后接收时间
 
 /* 动态WiFi配置变量 */
 char current_wifi_ssid[64] = WIFI_SSID;        // 当前WiFi SSID
@@ -123,12 +126,14 @@ char current_wifi_password[64] = WIFI_PASSWORD; // 当前WiFi密码
 char old_wifi_ssid[64];                         // 旧WiFi SSID（用于回滚）
 char old_wifi_password[64];                     // 旧WiFi密码（用于回滚）
 uint8_t wifi_config_updated = 0;                // WiFi配置更新标志
+
+/* 设备码 - 基于芯片唯一ID生成 */
+char g_device_code[9];  // 全局设备码，8位十六进制 + 结束符
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);  // 系统时钟配置函数声明
 static void MX_GPIO_Init(void); // GPIO初始化函数声明（静态函数，仅在本文件内可见）
-static void MX_ADC1_Init(void); // ADC1初始化函数声明（雨水传感器）
 static void MX_USART1_UART_Init(void); // USART1初始化函数声明（调试串口）
 static void MX_USART2_UART_Init(void); // USART2初始化函数声明
 static void MX_USART3_UART_Init(void); // USART3初始化函数声明（雷达串口）
@@ -141,6 +146,8 @@ void USART2_SendString(const char *str);   // 串口发送字符串函数原型
 uint8_t WiFiConfig_Load(WiFiConfig_t *config);     // 从Flash加载WiFi配置
 uint8_t WiFiConfig_Save(WiFiConfig_t *config);     // 保存WiFi配置到Flash
 uint32_t WiFiConfig_CalculateChecksum(WiFiConfig_t *config);  // 计算配置校验和
+void Get_STM32_UID(char *uid_str);         // 获取STM32芯片唯一ID
+void Generate_Device_Code(char *device_code);  // 生成8位设备码
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -342,11 +349,10 @@ int main(void)
   /* Initialize all configured peripherals */
   /* 初始化所有配置的外设 */
   MX_GPIO_Init();              // 初始化GPIO（LED引脚）
-  MX_ADC1_Init();              // 初始化ADC1（雨水传感器，PA0）
   MX_USART1_UART_Init();       // 初始化USART1（调试串口）
   MX_USART2_UART_Init();       // 初始化USART2（串口）
   MX_USART3_UART_Init();       // 初始化USART3（雷达串口）
-  
+
   SHT30_Soft_Init();  // 初始化软件I2C
   HAL_Delay(10);
 
@@ -360,129 +366,111 @@ int main(void)
     USART2_SendString("[ERR] Radar init failed\r\n");
   }
 
+  /* 初始化红外传感器模块 */
+  if(IR_SENSOR_Init() == 0)
+  {
+    USART2_SendString("[OK] IR Sensor initialized\r\n");
+  }
+  else
+  {
+    USART2_SendString("[ERR] IR Sensor init failed\r\n");
+  }
+
   /* 启动串口接收中断，用于接收ESP模块的响应 */
   HAL_UART_Receive_IT(&huart2, &rx_buffer[0], 1);
 
-  /* ESP硬件诊断 - 检查连接和响应 */
-  USART2_SendString("\r\n=== ESP Hardware Diagnostic ===\r\n");
-  USART2_SendString("Please verify:\r\n");
-  USART2_SendString("1. CH_PD pin connected to 3.3V\r\n");
-  USART2_SendString("2. VCC: 3.3V, GND: GND\r\n");
-  USART2_SendString("3. ESP-TX -> STM32-PA3, ESP-RX -> STM32-PA2\r\n");
-  USART2_SendString("4. GPIO0: floating or 3.3V (NOT grounded!)\r\n");
-  USART2_SendString("Waiting 3 seconds for ESP to boot...\r\n");
+  /* 生成设备码（基于芯片唯一ID） */
+  Generate_Device_Code(g_device_code);
+  char device_msg[64];
+  snprintf(device_msg, sizeof(device_msg), "Device Code: %s\r\n", g_device_code);
+  USART2_SendString(device_msg);
+  DEBUG_SendString(device_msg);
 
-  /* 等待3秒,给ESP足够的启动时间 */
-  HAL_Delay(3000);
+  /* ESP初始化 - 使用从STM32-ESP01S移植的简化驱动 */
+  USART2_SendString("\r\n=== ESP01S Initialization ===\r\n");
 
-  /* 测试AT命令 */
-  USART2_SendString("Sending: AT\r\n");
-  ESP_SendATCommand("AT\r\n", 2000);
-  HAL_Delay(1000);
+  char msg[128];
+  snprintf(msg, sizeof(msg), "WiFi: %s\r\n", current_wifi_ssid);
+  USART2_SendString(msg);
+  snprintf(msg, sizeof(msg), "MQTT: %s:%d\r\n", MQTT_SERVER, MQTT_PORT);
+  USART2_SendString(msg);
 
-  /* 检查是否有响应 */
-  if(esp_response_ready)
+  /* 初始化ESP模块并连接WiFi和MQTT */
+  if(ESP01S_Init(current_wifi_ssid, current_wifi_password,
+                 MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD,
+                 MQTT_SERVER, MQTT_PORT) != ESP_OK)
   {
-    USART2_SendString("[OK] ESP is responding!\r\n");
-    USART2_SendString((char*)esp_rx_buffer);
-    USART2_SendString("\r\n");
-  }
-  else
-  {
-    USART2_SendString("[ERROR] ESP not responding!\r\n");
-    USART2_SendString("Please check:\r\n");
-    USART2_SendString("- Power: 3.3V, 500mA+\r\n");
-    USART2_SendString("- CH_PD connected to 3.3V\r\n");
-    USART2_SendString("- TX/RX not reversed\r\n");
-    USART2_SendString("- GPIO0 not grounded\r\n");
-    USART2_SendString("Continuing anyway...\r\n\r\n");
-  }
+    USART2_SendString("[ERR] ESP01S initialization failed\r\n");
 
-  /* 从Flash加载WiFi配置 */
-  WiFiConfig_t saved_config;
-  if(WiFiConfig_Load(&saved_config) == 0)
-  {
-    /* 使用Flash中保存的配置 */
-    strncpy(current_wifi_ssid, saved_config.ssid, sizeof(current_wifi_ssid));
-    strncpy(current_wifi_password, saved_config.password, sizeof(current_wifi_password));
-    
-    char msg[100];
-    snprintf(msg, sizeof(msg), "[INFO] Using saved WiFi: %s\r\n", current_wifi_ssid);
-    USART2_SendString(msg);
-  }
-  else
-  {
-    /* Flash中无有效配置，使用默认值 */
-    USART2_SendString("[INFO] Using default WiFi config\r\n");
-  }
-  
-  /* 使用封装函数连接WiFi和MQTT */
-  if(ESP_ConnectWiFiAndMQTT(current_wifi_ssid, current_wifi_password,
-                            MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD,
-                            MQTT_SERVER, MQTT_PORT, MQTT_SSL,
-                            MQTT_SUBSCRIBE_TOPIC,
-                            MQTT_PUBLISH_TOPIC, NULL) != ESP_OK)
-  {
-    USART2_SendString("[ERR] Setup failed\r\n");
-  }
-  else
-  {
-    /* MQTT连接成功，立即读取并发送一次传感器数据 */
-    float init_temp, init_humi;
-    uint8_t sht30_ret = SHT30_Soft_Read(&init_temp, &init_humi);
-    
-    HAL_ADC_Start(&hadc1);
-    uint32_t init_adc = 0;
-    if(HAL_ADC_PollForConversion(&hadc1, 1000) == HAL_OK)
+    /* 持续尝试重新初始化 */
+    while(1)
     {
-      init_adc = HAL_ADC_GetValue(&hadc1);
-    }
-    HAL_ADC_Stop(&hadc1);
-    uint32_t init_wet = 100 - ((init_adc * 100) / 4095);
-    
-    if(sht30_ret == 0)
-    {
-      int temp_int = (int)init_temp;
-      int temp_dec = (int)((init_temp - temp_int) * 100);
-      int humi_int = (int)init_humi;
-      int humi_dec = (int)((init_humi - humi_int) * 100);
-      
-      char combined_payload[150];
-      snprintf(combined_payload, sizeof(combined_payload), 
-               "temp%d%02d_humi%d%02d_rain%lu_wet%lu", 
-               temp_int, temp_dec, humi_int, humi_dec, init_adc, init_wet);
-      
-      if(ESP_PublishMQTT(MQTT_PUBLISH_TOPIC, combined_payload) != ESP_OK)
+      USART2_SendString("\r\n[RETRY] Attempting to reinitialize ESP...\r\n");
+      HAL_Delay(10000);
+
+      if(ESP01S_Init(current_wifi_ssid, current_wifi_password,
+                     MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD,
+                     MQTT_SERVER, MQTT_PORT) == ESP_OK)
       {
-        USART2_SendString("[WARN] Initial publish failed\r\n");
+        USART2_SendString("[OK] ESP01S reinitialization successful!\r\n");
+        break;
       }
     }
   }
-  
+  else
+  {
+    USART2_SendString("[OK] ESP01S initialized and connected!\r\n");
+  }
+
+  /* 温湿度数据已合并到雷达消息中，不再单独发送初始数据 */
+
   USART2_SendString("\r\n[OK] Ready\r\n");
   DEBUG_SendString("[SYSTEM] Will continuously process MQTT messages\r\n\r\n");
-  
-  /* esp_mode保持为1，继续接收ESP数据（包括MQTT消息） */
-  /* UART中断已经在运行中，无需重新启动 */
-  
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* 无限循环 */
   /* USER CODE BEGIN WHILE */
-  
+
   /* 传感器读取控制变量 - 统一管理 */
   uint32_t sensor_last_read_time = HAL_GetTick();
-  uint32_t sensor_read_interval = 10000;  // 传感器读取间隔（10秒）
   float sht30_temp, sht30_humi;
-  
+  float last_temp = 0.0f;  // 上次温度值
+  float last_humi = 0.0f;  // 上次湿度值
+
+  /* 智能发送频率控制 */
+  uint8_t rapid_send_count = 0;      // 快速发送计数器（0-10次）
+  const uint8_t MAX_RAPID_SEND = 10;  // 最大快速发送次数
+  uint32_t rapid_send_interval = 3000;  // 快速发送间隔：3秒
+  uint32_t normal_send_interval = 15000; // 正常发送间隔：15秒
+
   /* MQTT连接失败计数器 */
   uint8_t mqtt_fail_count = 0;
   const uint8_t MQTT_MAX_FAIL = 3;
-  
+
+  /* ESP模块健康监控 - 看门狗机制 */
+  uint8_t esp_not_response_count = 0;  // ESP无响应计数器
+  const uint8_t ESP_MAX_NO_RESPONSE = 5;  // 最大无响应次数，超过则重启设备
+
+  /* MQTT连接状态检查定时器 */
+  uint32_t mqtt_last_check_time = HAL_GetTick();
+  const uint32_t MQTT_CHECK_INTERVAL = 60000;  // 每60秒检查一次MQTT连接状态
+
+  /* ESP缓冲区清理定时器 */
+  uint32_t esp_buffer_clean_time = HAL_GetTick();
+  const uint32_t ESP_BUFFER_CLEAN_INTERVAL = 10000;  // 每10秒清理一次缓冲区
+
   while (1)
   {
     /* USER CODE END WHILE */
+    
+    /* 定期清理ESP接收缓冲区，防止数据堆积 */
+    if(HAL_GetTick() - esp_buffer_clean_time >= ESP_BUFFER_CLEAN_INTERVAL)
+    {
+      ESP_ClearBuffer();
+      esp_buffer_clean_time = HAL_GetTick();
+    }
     
     /* 检查是否收到MQTT消息并处理WiFi配置更新（必须在ESP_ProcessReceivedData之前） */
     if(esp_rx_complete && strstr((char*)esp_rx_buffer, "+MQTTSUBRECV") != NULL)
@@ -540,180 +528,172 @@ int main(void)
     ESP_ProcessReceivedData();
     
     /* 处理WiFi配置更新 */
+    /* 注意：WiFi动态重连功能需要实现ESP_ConnectWiFi等函数 */
+    /* 当前版本暂不支持运行时WiFi配置更改，需要重启设备 */
     if(wifi_config_updated)
     {
       wifi_config_updated = 0;
-      USART2_SendString("[INFO] Reconnecting with new WiFi config...\r\n");
-      
-      /* 先断开当前WiFi连接 */
-      ESP_DisconnectWiFi();
-      HAL_Delay(1000);  // 等待断开完成
-      
-      /* 直接连接新WiFi */
-      if(ESP_ConnectWiFi(current_wifi_ssid, current_wifi_password) == ESP_OK)
+      USART2_SendString("[INFO] WiFi config updated. Reboot to apply changes.\r\n");
+
+      /* 保存新WiFi配置到Flash，下次启动时使用 */
+      WiFiConfig_t new_config;
+      memset(&new_config, 0, sizeof(new_config));
+      strncpy(new_config.ssid, current_wifi_ssid, sizeof(new_config.ssid));
+      strncpy(new_config.password, current_wifi_password, sizeof(new_config.password));
+      WiFiConfig_Save(&new_config);
+
+      /* 发布提示消息 */
+      if(ESP_PublishMQTT(MQTT_SUBSCRIBE_TOPIC, "WiFi config saved. Please reboot device.") == ESP_OK)
       {
-        USART2_SendString("[OK] WiFi connected\r\n");
-        
-        /* 配置并连接MQTT */
-        if(ESP_ConfigureMQTT(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD) == ESP_OK &&
-           ESP_ConnectMQTT(MQTT_SERVER, MQTT_PORT, MQTT_SSL) == ESP_OK)
-        {
-          USART2_SendString("[OK] MQTT connected\r\n");
-          HAL_Delay(2000);  // 等待连接稳定
-          
-          /* 订阅主题 */
-          if(ESP_SubscribeMQTT(MQTT_SUBSCRIBE_TOPIC) == ESP_OK)
-          {
-            USART2_SendString("[OK] Reconnected with new WiFi\r\n");
-            mqtt_fail_count = 0;
-            
-            /* 保存新WiFi配置到Flash，确保下次通电使用新WiFi */
-            WiFiConfig_t new_config;
-            memset(&new_config, 0, sizeof(new_config));
-            strncpy(new_config.ssid, current_wifi_ssid, sizeof(new_config.ssid));
-            strncpy(new_config.password, current_wifi_password, sizeof(new_config.password));
-            WiFiConfig_Save(&new_config);
-            
-            /* 发布WiFi设置成功消息到testtopic1 */
-            if(ESP_PublishMQTT(MQTT_SUBSCRIBE_TOPIC, "wifi setting OK") == ESP_OK)
-            {
-              USART2_SendString("[OK] Published WiFi setting success message\r\n");
-            }
-          }
-        }
-        else
-        {
-          USART2_SendString("[ERR] MQTT connection failed\r\n");
-        }
-      }
-      else
-      {
-        USART2_SendString("[ERR] Failed to reconnect with new WiFi\r\n");
-        
-        char rollback_msg[200];
-        snprintf(rollback_msg, sizeof(rollback_msg), 
-                 "[INFO] Trying to reconnect with old WiFi: %s\r\n", old_wifi_ssid);
-        USART2_SendString(rollback_msg);
-        
-        /* 回滚到旧WiFi配置 */
-        strncpy(current_wifi_ssid, old_wifi_ssid, sizeof(current_wifi_ssid));
-        strncpy(current_wifi_password, old_wifi_password, sizeof(current_wifi_password));
-        
-        /* 尝试连接旧WiFi */
-        ESP_DisconnectWiFi();
-        HAL_Delay(1000);
-        
-        if(ESP_ConnectWiFi(current_wifi_ssid, current_wifi_password) == ESP_OK)
-        {
-          USART2_SendString("[OK] Reconnected to old WiFi\r\n");
-          
-          /* 配置并连接MQTT */
-          if(ESP_ConfigureMQTT(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD) == ESP_OK &&
-             ESP_ConnectMQTT(MQTT_SERVER, MQTT_PORT, MQTT_SSL) == ESP_OK)
-          {
-            USART2_SendString("[OK] MQTT connected\r\n");
-            HAL_Delay(2000);
-            
-            /* 订阅主题 */
-            if(ESP_SubscribeMQTT(MQTT_SUBSCRIBE_TOPIC) == ESP_OK)
-            {
-              USART2_SendString("[OK] Rollback successful\r\n");
-              mqtt_fail_count = 0;
-              
-              /* 发布WiFi设置失败消息到testtopic1 */
-              if(ESP_PublishMQTT(MQTT_SUBSCRIBE_TOPIC, "wifi setting ERROR") == ESP_OK)
-              {
-                USART2_SendString("[OK] Published WiFi setting error message\r\n");
-              }
-              
-              /* 恢复旧配置到Flash */
-              WiFiConfig_t old_config;
-              memset(&old_config, 0, sizeof(old_config));
-              strncpy(old_config.ssid, old_wifi_ssid, sizeof(old_config.ssid));
-              strncpy(old_config.password, old_wifi_password, sizeof(old_config.password));
-              WiFiConfig_Save(&old_config);
-            }
-          }
-        }
-        else
-        {
-          USART2_SendString("[ERR] Failed to reconnect to old WiFi\r\n");
-        }
+        USART2_SendString("[OK] Published WiFi config update message\r\n");
       }
     }
     
-    /* 统一读取所有传感器数据并合并发送 */
-    if(HAL_GetTick() - sensor_last_read_time >= sensor_read_interval)
+    /* 智能传感器数据读取和发送 */
+    /* 策略：温湿度数据已合并到雷达消息中发送 */
+    /* 注意：温湿度读取和检测逻辑保留，但不单独发送MQTT消息 */
+    uint32_t current_interval;
+
+    if(rapid_send_count < MAX_RAPID_SEND)
     {
-      /* 1. 读取SHT30温湿度 */
+      current_interval = rapid_send_interval;  // 快速发送模式：3秒
+    }
+    else
+    {
+      current_interval = normal_send_interval;  // 正常发送模式：15秒
+    }
+
+    if(HAL_GetTick() - sensor_last_read_time >= current_interval)
+    {
+      /* 读取SHT30温湿度（用于状态检测，MQTT发送由雷达模块负责） */
       uint8_t ret = SHT30_Soft_Read(&sht30_temp, &sht30_humi);
-      
-      /* 2. 读取雨水传感器 */
-      HAL_ADC_Start(&hadc1);
-      uint32_t adc_value = 0;
-      uint32_t wet_percent = 0;
-      
-      if(HAL_ADC_PollForConversion(&hadc1, 1000) == HAL_OK)
-      {
-        adc_value = HAL_ADC_GetValue(&hadc1);
-        uint32_t dry_percent = (adc_value * 100) / 4095;
-        wet_percent = 100 - dry_percent;
-      }
-      HAL_ADC_Stop(&hadc1);
-      
-      /* 3. 输出到串口 */
+
       if(ret == 0)
       {
+        /* 检测状态变化（温度或湿度变化超过阈值）*/
+        #define TEMP_THRESHOLD 0.5f  // 温度变化阈值：0.5°C
+        #define HUMI_THRESHOLD 2.0f  // 湿度变化阈值：2%
+
+        uint8_t state_changed = 0;
+
+        /* 首次读取或状态变化 */
+        if(last_temp == 0.0f && last_humi == 0.0f)
+        {
+          /* 首次读取，视为状态变化 */
+          state_changed = 1;
+        }
+        else
+        {
+          /* 检查温度变化 */
+          if((sht30_temp - last_temp) >= TEMP_THRESHOLD ||
+             (last_temp - sht30_temp) >= TEMP_THRESHOLD)
+          {
+            state_changed = 1;
+          }
+
+          /* 检查湿度变化 */
+          if((sht30_humi - last_humi) >= HUMI_THRESHOLD ||
+             (last_humi - sht30_humi) >= HUMI_THRESHOLD)
+          {
+            state_changed = 1;
+          }
+        }
+
+        /* 状态改变时重置快速发送计数器 */
+        if(state_changed)
+        {
+          if(rapid_send_count >= MAX_RAPID_SEND)
+          {
+            char state_msg[80];
+            snprintf(state_msg, sizeof(state_msg),
+                     "[STATE] Changed! T:%.1f->%.1f H:%.1f->%.1f\r\n",
+                     last_temp, sht30_temp, last_humi, sht30_humi);
+            USART2_SendString(state_msg);
+          }
+          rapid_send_count = 0;  // 重置为快速发送模式
+        }
+
+        /* 保存当前值 */
+        last_temp = sht30_temp;
+        last_humi = sht30_humi;
+
+        /* 输出到串口 */
         int temp_int = (int)sht30_temp;
         int temp_dec = (int)((sht30_temp - temp_int) * 100);
         int humi_int = (int)sht30_humi;
         int humi_dec = (int)((sht30_humi - humi_int) * 100);
-        
-        char debug_str[100];
-        snprintf(debug_str, sizeof(debug_str), 
-                 "T:%d.%02d H:%d.%02d R:%lu W:%lu%%\r\n", 
-                 temp_int, temp_dec, humi_int, humi_dec, adc_value, wet_percent);
+
+        char debug_str[60];
+        snprintf(debug_str, sizeof(debug_str),
+                 "T:%d.%02d H:%d.%02d [%d/%d]\r\n",
+                 temp_int, temp_dec, humi_int, humi_dec,
+                 rapid_send_count, MAX_RAPID_SEND);
         USART2_SendString(debug_str);
-        
-        /* 4. 合并数据并发送到MQTT */
-        char combined_payload[150];
-        snprintf(combined_payload, sizeof(combined_payload), 
-                 "temp%d%02d_humi%d%02d_rain%lu_wet%lu", 
-                 temp_int, temp_dec, humi_int, humi_dec, adc_value, wet_percent);
-        
-        if(ESP_PublishMQTT(MQTT_PUBLISH_TOPIC, combined_payload) == ESP_OK)
+
+        /* 温湿度MQTT发送已移到雷达模块中合并发送 */
+        /* 此处不再单独发送温湿度数据 */
+
+        /* 增加快速发送计数器 */
+        if(rapid_send_count < MAX_RAPID_SEND)
         {
-          mqtt_fail_count = 0;
-        }
-        else
-        {
-          mqtt_fail_count++;
-          char fail_msg[50];
-          snprintf(fail_msg, sizeof(fail_msg), "[WARN] Fail count: %d\r\n", mqtt_fail_count);
-          USART2_SendString(fail_msg);
-          
-          if(mqtt_fail_count >= MQTT_MAX_FAIL)
-          {
-            USART2_SendString("[ERR] Reconnecting...\r\n");
-            
-            if(ESP_ConnectWiFiAndMQTT(current_wifi_ssid, current_wifi_password,
-                                      MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD,
-                                      MQTT_SERVER, MQTT_PORT, MQTT_SSL,
-                                      MQTT_SUBSCRIBE_TOPIC,
-                                      MQTT_PUBLISH_TOPIC, NULL) == ESP_OK)
-            {
-              USART2_SendString("[OK] Reconnected\r\n");
-              mqtt_fail_count = 0;
-            }
-          }
+          rapid_send_count++;
         }
       }
-      
+
       sensor_last_read_time = HAL_GetTick();
     }
 
-    /* 处理雷达数据 */
+    /* 处理雷达数据（包含红外传感器融合） */
     RADAR_Process();
+
+    /* 定期检查MQTT连接状态并自动恢复 */
+    /* 注意：由于雷达数据发布会不断重置mqtt_fail_count，只有在发布真正失败时才会触发重连 */
+    if(HAL_GetTick() - mqtt_last_check_time >= MQTT_CHECK_INTERVAL)
+    {
+      mqtt_last_check_time = HAL_GetTick();
+
+      /* 检查ESP模块是否响应 */
+      if(ESP_CheckHealth() == ESP_OK)
+      {
+        /* ESP模块正常，重置无响应计数器 */
+        esp_not_response_count = 0;
+
+        /* ESP模块正常，MQTT连接状态由数据发布的成功/失败来监控 */
+        /* 如果mqtt_fail_count达到阈值，说明持续发布失败，需要重连 */
+        if(mqtt_fail_count >= MQTT_MAX_FAIL)
+        {
+          USART2_SendString("[WARN] MQTT connection unstable. Will retry on next publish.\r\n");
+          /* MQTT自动重连功能需要在esp.c中实现ESP_ConfigureMQTT等函数 */
+          /* 当前版本简化处理：重置失败计数器，依赖下一次发布尝试 */
+          mqtt_fail_count = 0;
+        }
+      }
+      else
+      {
+        /* ESP模块无响应，增加计数器 */
+        esp_not_response_count++;
+        char error_msg[100];
+        snprintf(error_msg, sizeof(error_msg),
+                 "[ERROR] ESP module not responding! (Count: %d/%d)\r\n",
+                 esp_not_response_count, ESP_MAX_NO_RESPONSE);
+        USART2_SendString(error_msg);
+
+        /* 如果连续无响应次数超过阈值，重启设备 */
+        if(esp_not_response_count >= ESP_MAX_NO_RESPONSE)
+        {
+          USART2_SendString("[CRITICAL] ESP module dead! Rebooting system...\r\n");
+          HAL_Delay(1000);  // 给串口时间发送消息
+
+          /* 重启STM32设备 */
+          NVIC_SystemReset();
+        }
+        else
+        {
+          /* 触发持续重连 */
+          mqtt_fail_count = MQTT_MAX_FAIL;
+        }
+      }
+    }
 
     /* 短暂延时，避免CPU空转，但不阻塞ESP数据处理 */
     HAL_Delay(10);  // 10ms延时，确保ESP数据能及时处理
@@ -1043,51 +1023,51 @@ static void MX_GPIO_Init(void)
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
-/**
-  * @brief ADC1 Initialization Function
-  * @details 初始化ADC1用于读取雨水传感器（PA0，ADC1通道0）
-  *          配置：12位分辨率，单次转换模式
-  * @param None
-  * @retval None
-  */
-static void MX_ADC1_Init(void)
-{
-  ADC_ChannelConfTypeDef sConfig = {0};
-
-  /* USER CODE BEGIN ADC1_Init 0 */
-  /* USER CODE END ADC1_Init 0 */
-
-  /* USER CODE BEGIN ADC1_Init 1 */
-  /* USER CODE END ADC1_Init 1 */
-
-  /** Common config */
-  hadc1.Instance = ADC1;
-  hadc1.Init.ScanConvMode = ADC_SCAN_DISABLE;           // 禁用扫描模式（单通道）
-  hadc1.Init.ContinuousConvMode = DISABLE;              // 禁用连续转换
-  hadc1.Init.DiscontinuousConvMode = DISABLE;           // 禁用间断转换
-  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;     // 软件触发
-  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;           // 数据右对齐
-  hadc1.Init.NbrOfConversion = 1;                       // 转换通道数量：1
-  if (HAL_ADC_Init(&hadc1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure Regular Channel */
-  sConfig.Channel = ADC_CHANNEL_0;                      // 通道0（PA0）
-  sConfig.Rank = ADC_REGULAR_RANK_1;                    // 转换顺序：第1个
-  sConfig.SamplingTime = ADC_SAMPLETIME_55CYCLES_5;     // 采样时间：55.5周期
-  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN ADC1_Init 2 */
-  /* USER CODE END ADC1_Init 2 */
-}
-
 /* USER CODE BEGIN 4 */
 /* 用户代码开始：第4区 */
 /* 可以在此处定义自定义函数 */
+
+/**
+  * @brief 获取STM32芯片唯一ID
+  * @param uid_str: 存储唯一ID字符串的缓冲区（至少25字节）
+  * @retval None
+  * @details STM32F103系列有一个96位的唯一ID，存储在地址0x1FFFF7E8
+  *          格式化为24位十六进制字符串
+  */
+void Get_STM32_UID(char *uid_str)
+{
+  // STM32F103唯一ID地址：0x1FFFF7E8
+  // 包含3个32位字，共96位
+  const uint32_t *uid_base = (const uint32_t *)0x1FFFF7E8U;
+
+  // 读取3个32位的ID
+  uint32_t uid_0 = uid_base[0];
+  uint32_t uid_1 = uid_base[1];
+  uint32_t uid_2 = uid_base[2];
+
+  // 格式化为字符串：XXXXXXXX-XXXXXXXX-XXXXXXXX
+  sprintf(uid_str, "%08" PRIX32 "%08" PRIX32 "%08" PRIX32, uid_0, uid_1, uid_2);
+}
+
+/**
+  * @brief 生成8位设备码
+  * @param device_code: 存储8位设备码的缓冲区（至少9字节，包含结束符）
+  * @retval None
+  * @details 基于STM32唯一ID生成8位十六进制设备码
+  *          取UID的前32位，转换为8位十六进制字符串
+  *          这样每台设备都有唯一的设备标识
+  */
+void Generate_Device_Code(char *device_code)
+{
+  // STM32F103唯一ID地址：0x1FFFF7E8
+  const uint32_t *uid_base = (const uint32_t *)0x1FFFF7E8U;
+
+  // 读取第一个32位ID
+  uint32_t uid_0 = uid_base[0];
+
+  // 格式化为8位十六进制字符串
+  sprintf(device_code, "%08" PRIX32, uid_0);
+}
 
 /**
   * @brief USART2中断回调函数
@@ -1113,7 +1093,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
   {
       // 更新最后接收时间戳（用于超时检测）
       esp_last_rx_time = HAL_GetTick();
-      
+
       // 检查是否收到换行符或回车符，表示ESP模块的一行响应结束
       if(rx_buffer[0] == '\r' || rx_buffer[0] == '\n')
       {
@@ -1126,9 +1106,9 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
           esp_rx_complete = 1;
           // 设置响应就绪标志，让等待函数能够立即处理
           esp_response_ready = 1;
-          
-          // 注意：不在中断中重置esp_rx_index，避免新数据覆盖未处理的旧数据
-          // esp_rx_index将在ESP_ProcessReceivedData()处理完数据后重置
+
+          // 注意：不在中断中重置esp_rx_index
+          // 索引将在主循环处理完响应后被ESP_SendATCommand重置
         }
         // 如果esp_rx_index==0，说明是连续的换行符，直接忽略，不存储
       }
@@ -1142,8 +1122,12 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         }
         else
         {
-          // ESP缓冲区满，重置索引，避免溢出
-          esp_rx_index = 0;
+          // 缓冲区满，强制标记为完成并重置
+          // 这样可以避免缓冲区溢出导致的数据丢失
+          esp_rx_buffer[esp_rx_index] = '\0';
+          esp_rx_complete = 1;
+          esp_response_ready = 1;
+          // 注意：索引将在主循环中被重置
         }
       }
       

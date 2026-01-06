@@ -41,7 +41,8 @@ extern "C" {
 
 /* Exported constants --------------------------------------------------------*/
 /* USER CODE BEGIN EC */
-
+#define MQTT_SUBSCRIBE_TOPIC  "testtopic2"  // 订阅的主题
+#define MQTT_PUBLISH_TOPIC   "diantiTopic"  // 发布的主题
 /* USER CODE END EC */
 
 /* Exported macro ------------------------------------------------------------*/
@@ -56,6 +57,7 @@ void Error_Handler(void);
 int _write(int file, char *ptr, int len);
 void DEBUG_SendString(const char *str);
 void USART2_SendString(const char *str);
+void Get_STM32_UID(char *uid_str);  /* 获取STM32唯一ID */
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
