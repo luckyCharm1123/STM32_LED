@@ -74,9 +74,6 @@
 #define MQTT_PORT      1588               // MQTT服务器端口
 #define MQTT_SSL       0                  // SSL标志 (0=不启用, 1=启用)
 
-/* MQTT主题和消息配置 */
-#define MQTT_PUBLISH_MESSAGE "hello"        // 发布的消息内容
-
 /* Flash配置存储 - 使用最后一页(Page 63, 1KB) */
 #define FLASH_CONFIG_ADDR    0x0800FC00  // Flash最后一页起始地址 (64KB - 1KB)
 #define CONFIG_MAGIC_NUMBER  0x12345678  // 配置有效性标识
@@ -88,16 +85,7 @@ typedef struct {
   char password[64];        // WiFi密码
   uint32_t checksum;        // 校验和
 } WiFiConfig_t;
-/* USER CODE END PD */
 
-/* Private macro -------------------------------------------------------------*/
-/* USER CODE BEGIN PM */
-/* 用户代码开始：私有宏定义 */
-/* 可以在此处定义自定义宏 */
-/* USER CODE END PM */
-
-/* Private variables ---------------------------------------------------------*/
-/* 私有变量 */
 UART_HandleTypeDef huart1;  // USART1句柄，用于调试输出（PA9/PA10，115200）
 UART_HandleTypeDef huart2;  // USART2句柄，用于管理串口2的所有操作
 UART_HandleTypeDef huart3;  // USART3句柄，用于毫米波雷达通信（PB10/PB11，115200）
@@ -140,7 +128,6 @@ static void MX_USART3_UART_Init(void); // USART3初始化函数声明（雷达�
 
 /* USER CODE BEGIN PFP */
 /* 用户代码开始：私有函数原型 */
-int _write(int file, char *ptr, int len);  // 重定向printf函数原型，用于printf到串口
 void DEBUG_SendString(const char *str);    // USART1调试串口发送函数原型
 void USART2_SendString(const char *str);   // 串口发送字符串函数原型
 uint8_t WiFiConfig_Load(WiFiConfig_t *config);     // 从Flash加载WiFi配置
@@ -154,28 +141,6 @@ void Generate_Device_Code(char *device_code);  // 生成8位设备码
 /* 私有用户代码 */
 /* USER CODE BEGIN 0 */
 /* 用户代码开始：第0区 */
-
-/**
-  * @brief 重定向printf到USART2
-  * @param file: 文件描述符（标准输出为1）
-  * @param ptr: 数据指针，指向要发送的数据
-  * @param len: 数据长度，要发送的字节数
-  * @retval 返回发送的数据长度
-  * @details 重写C库函数_write，使printf等标准输出函数能输出到串口
-  *          这是ARM GCC编译器的标准做法，用于重定向标准输出
-  */
-int _write(int file, char *ptr, int len)
-{
-  // 使用HAL库的UART阻塞发送函数
-  // &huart2: USART2句柄
-  // (uint8_t*)ptr: 数据指针，需要转换为uint8_t*
-  // len: 数据长度
-  // HAL_MAX_DELAY: 最大等待时间，表示一直等待直到发送完成
-  HAL_UART_Transmit(&huart2, (uint8_t*)ptr, len, HAL_MAX_DELAY);
-  
-  // 返回发送的字节数，表示成功
-  return len;
-}
 
 /**
   * @brief USART2发送字符串
@@ -314,40 +279,8 @@ uint8_t WiFiConfig_Save(WiFiConfig_t *config)
   */
 int main(void)
 {
-  /* USER CODE BEGIN 1 */
-  /* 用户代码开始：第1区 */
-  /* 可以在此处添加主函数开始前的预处理代码 */
-  /* USER CODE END 1 */
-
-  /* MCU Configuration--------------------------------------------------------*/
-  /* MCU配置 */
-
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-  /* 复位所有外设，初始化Flash接口和Systick定时器
-   * HAL_Init()函数执行以下操作：
-   * - 复位所有外设寄存器到默认值
-   * - 初始化Flash接口（设置等待周期等）
-   * - 配置SysTick定时器（1ms中断）
-   * - 设置NVIC优先级分组
-   */
   HAL_Init();
-
-  /* USER CODE BEGIN Init */
-  /* 用户代码开始：初始化 */
-  /* 可以在此处添加自定义的初始化代码 */
-  /* USER CODE END Init */
-
-  /* Configure the system clock */
-  /* 配置系统时钟 */
   SystemClock_Config();
-
-  /* USER CODE BEGIN SysInit */
-  /* 用户代码开始：系统初始化 */
-  /* 可以在此处添加系统级初始化代码 */
-  /* USER CODE END SysInit */
-
-  /* Initialize all configured peripherals */
-  /* 初始化所有配置的外设 */
   MX_GPIO_Init();              // 初始化GPIO（LED引脚）
   MX_USART1_UART_Init();       // 初始化USART1（调试串口）
   MX_USART2_UART_Init();       // 初始化USART2（串口）
@@ -357,23 +290,15 @@ int main(void)
   HAL_Delay(10);
 
   /* 初始化雷达模块 */
-  if(RADAR_Init() == 0)
+  if(RADAR_Init() != 0)
   {
-    USART2_SendString("[OK] Radar initialized\r\n");
-  }
-  else
-  {
-    USART2_SendString("[ERR] Radar init failed\r\n");
+    DEBUG_SendString("[ERR] Radar init failed\r\n");
   }
 
   /* 初始化红外传感器模块 */
-  if(IR_SENSOR_Init() == 0)
+  if(IR_SENSOR_Init() != 0)
   {
-    USART2_SendString("[OK] IR Sensor initialized\r\n");
-  }
-  else
-  {
-    USART2_SendString("[ERR] IR Sensor init failed\r\n");
+    DEBUG_SendString("[ERR] IR Sensor init failed\r\n");
   }
 
   /* 启动串口接收中断，用于接收ESP模块的响应 */
@@ -382,8 +307,9 @@ int main(void)
   /* 生成设备码（基于芯片唯一ID） */
   Generate_Device_Code(g_device_code);
   char device_msg[64];
+  /* 拼接字符串 */
   snprintf(device_msg, sizeof(device_msg), "Device Code: %s\r\n", g_device_code);
-  USART2_SendString(device_msg);
+  /* 发送到串口调试 */
   DEBUG_SendString(device_msg);
 
   /* ESP初始化 - 使用从STM32-ESP01S移植的简化驱动 */
@@ -394,10 +320,13 @@ int main(void)
   USART2_SendString(msg);
   snprintf(msg, sizeof(msg), "MQTT: %s:%d\r\n", MQTT_SERVER, MQTT_PORT);
   USART2_SendString(msg);
+  snprintf(msg, sizeof(msg), "Client ID: %s\r\n", g_device_code);
+  USART2_SendString(msg);
 
   /* 初始化ESP模块并连接WiFi和MQTT */
+  /* 使用设备码(g_device_code)作为MQTT客户端ID，确保每台设备唯一 */
   if(ESP01S_Init(current_wifi_ssid, current_wifi_password,
-                 MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD,
+                 g_device_code, MQTT_USERNAME, MQTT_PASSWORD,
                  MQTT_SERVER, MQTT_PORT) != ESP_OK)
   {
     USART2_SendString("[ERR] ESP01S initialization failed\r\n");
@@ -409,7 +338,7 @@ int main(void)
       HAL_Delay(10000);
 
       if(ESP01S_Init(current_wifi_ssid, current_wifi_password,
-                     MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD,
+                     g_device_code, MQTT_USERNAME, MQTT_PASSWORD,
                      MQTT_SERVER, MQTT_PORT) == ESP_OK)
       {
         USART2_SendString("[OK] ESP01S reinitialization successful!\r\n");
@@ -420,6 +349,20 @@ int main(void)
   else
   {
     USART2_SendString("[OK] ESP01S initialized and connected!\r\n");
+  }
+
+  /* 订阅MQTT主题 - 接收服务器下发的消息 */
+  USART2_SendString("\r\n=== MQTT Subscription ===\r\n");
+  if(ESP_SubscribeMQTT(MQTT_SUBSCRIBE_TOPIC) == ESP_OK)
+  {
+    char sub_msg[128];
+    snprintf(sub_msg, sizeof(sub_msg), "[OK] Subscribed to topic: %s\r\n", MQTT_SUBSCRIBE_TOPIC);
+    USART2_SendString(sub_msg);
+    DEBUG_SendString(sub_msg);
+  }
+  else
+  {
+    USART2_SendString("[WARN] MQTT subscription failed, will retry...\r\n");
   }
 
   /* 温湿度数据已合并到雷达消息中，不再单独发送初始数据 */
@@ -472,60 +415,64 @@ int main(void)
       esp_buffer_clean_time = HAL_GetTick();
     }
     
-    /* 检查是否收到MQTT消息并处理WiFi配置更新（必须在ESP_ProcessReceivedData之前） */
-    if(esp_rx_complete && strstr((char*)esp_rx_buffer, "+MQTTSUBRECV") != NULL)
+    /* 处理ESP接收到的数据 - 显示MQTT消息并处理WiFi配置更新 */
+    if(esp_rx_complete)
     {
-      /* 查找消息内容中的WiFi配置信息 */
-      /* 格式: wifiname_新SSID_password_新密码 */
-      char *wifiname_pos = strstr((char*)esp_rx_buffer, "wifiname_");
-      if(wifiname_pos != NULL)
+      /* 先处理WiFi配置更新（如果消息中包含wifiname_） */
+      if(strstr((char*)esp_rx_buffer, "+MQTTSUBRECV") != NULL)
       {
-        wifiname_pos += 9;  // 跳过 "wifiname_"
-        char *password_pos = strstr(wifiname_pos, "_password_");
-        if(password_pos != NULL)
+        /* 查找消息内容中的WiFi配置信息 */
+        /* 格式: wifiname_新SSID_password_新密码 */
+        char *wifiname_pos = strstr((char*)esp_rx_buffer, "wifiname_");
+        if(wifiname_pos != NULL)
         {
-          /* 先备份当前WiFi配置（在修改之前） */
-          strncpy(old_wifi_ssid, current_wifi_ssid, sizeof(old_wifi_ssid));
-          strncpy(old_wifi_password, current_wifi_password, sizeof(old_wifi_password));
-          
-          /* 提取新的SSID */
-          int ssid_len = password_pos - wifiname_pos;
-          if(ssid_len > 0 && ssid_len < 64)
+          wifiname_pos += 9;  // 跳过 "wifiname_"
+          char *password_pos = strstr(wifiname_pos, "_password_");
+          if(password_pos != NULL)
           {
-            strncpy(current_wifi_ssid, wifiname_pos, ssid_len);
-            current_wifi_ssid[ssid_len] = '\0';
-            
-            /* 提取新的密码 */
-            password_pos += 10;  // 跳过 "_password_"
-            char *password_end = password_pos;
-            while(*password_end && *password_end != '\r' && 
-                  *password_end != '\n' && *password_end != '"')
+            /* 先备份当前WiFi配置（在修改之前） */
+            strncpy(old_wifi_ssid, current_wifi_ssid, sizeof(old_wifi_ssid));
+            strncpy(old_wifi_password, current_wifi_password, sizeof(old_wifi_password));
+
+            /* 提取新的SSID */
+            int ssid_len = password_pos - wifiname_pos;
+            if(ssid_len > 0 && ssid_len < 64)
             {
-              password_end++;
-            }
-            int pass_len = password_end - password_pos;
-            if(pass_len > 0 && pass_len < 64)
-            {
-              /* 更新为新WiFi密码 */
-              strncpy(current_wifi_password, password_pos, pass_len);
-              current_wifi_password[pass_len] = '\0';
-              
-              /* 设置更新标志 */
-              wifi_config_updated = 1;
-              
-              char update_msg[200];
-              snprintf(update_msg, sizeof(update_msg), 
-                       "[INFO] WiFi config updated - Old: %s, New: %s\r\n", 
-                       old_wifi_ssid, current_wifi_ssid);
-              USART2_SendString(update_msg);
+              strncpy(current_wifi_ssid, wifiname_pos, ssid_len);
+              current_wifi_ssid[ssid_len] = '\0';
+
+              /* 提取新的密码 */
+              password_pos += 10;  // 跳过 "_password_"
+              char *password_end = password_pos;
+              while(*password_end && *password_end != '\r' &&
+                    *password_end != '\n' && *password_end != '"')
+              {
+                password_end++;
+              }
+              int pass_len = password_end - password_pos;
+              if(pass_len > 0 && pass_len < 64)
+              {
+                /* 更新为新WiFi密码 */
+                strncpy(current_wifi_password, password_pos, pass_len);
+                current_wifi_password[pass_len] = '\0';
+
+                /* 设置更新标志 */
+                wifi_config_updated = 1;
+
+                char update_msg[200];
+                snprintf(update_msg, sizeof(update_msg),
+                         "[INFO] WiFi config updated - Old: %s, New: %s\r\n",
+                         old_wifi_ssid, current_wifi_ssid);
+                USART2_SendString(update_msg);
+              }
             }
           }
         }
       }
+
+      /* 所有ESP接收到的数据都发送到调试串口 */
+      ESP_ProcessReceivedData();
     }
-    
-    /* 处理ESP接收到的数据 - 显示MQTT消息 */
-    ESP_ProcessReceivedData();
     
     /* 处理WiFi配置更新 */
     /* 注意：WiFi动态重连功能需要实现ESP_ConnectWiFi等函数 */
@@ -968,8 +915,6 @@ static void MX_USART3_UART_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = {0};  // GPIO初始化结构体
-  
   /* USER CODE BEGIN MX_GPIO_Init_1 */
   /* 用户代码开始：GPIO初始化第1区 */
   /* USER CODE END MX_GPIO_Init_1 */
@@ -981,41 +926,6 @@ static void MX_GPIO_Init(void)
    * RCC->APB2ENR |= RCC_APB2ENR_IOPAEN;
    */
   __HAL_RCC_GPIOA_CLK_ENABLE();
-
-  /*Configure GPIO pin Output Level */
-  /* 配置GPIO引脚输出电平
-   * 在配置为输出模式之前，先设置初始输出电平
-   * 这样可以避免配置过程中引脚出现不确定状态
-   */
-  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);  // 设置LED引脚初始电平为低电平（熄灭）
-
-  /*Configure GPIO pin : LED_Pin */
-  /* 配置GPIO引脚：LED_Pin
-   * 配置LED引脚的工作模式和电气特性
-   */
-  GPIO_InitStruct.Pin = LED_Pin;                          // 引脚：LED_Pin（具体引脚号在main.h中定义）
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;             // 模式：推挽输出
-  /* 
-   * GPIO_MODE_OUTPUT_PP说明：
-   * - PP = Push-Pull（推挽输出）
-   * - 输出高电平时：引脚连接到VDD（3.3V）
-   * - 输出低电平时：引脚连接到VSS（GND）
-   * - 驱动能力强，适合驱动LED等负载
-   */
-  GPIO_InitStruct.Pull = GPIO_NOPULL;                     // 上拉/下拉：无
-  /* 
-   * GPIO_NOPULL说明：
-   * - 内部上拉电阻和下拉电阻都不使能
-   * - 引脚处于浮空状态（但作为输出模式时，此设置影响不大）
-   */
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;            // 速度：低速
-  /* 
-   * GPIO_SPEED_FREQ_LOW说明：
-   * - 输出速度等级：低速（2MHz）
-   * - 适用于LED、按键等低速外设
-   * - 功耗较低，电磁干扰较小
-   */
-  HAL_GPIO_Init(LED_GPIO_Port, &GPIO_InitStruct);         // 初始化GPIO
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
   /* 用户代码开始：GPIO初始化第2区 */
@@ -1160,28 +1070,20 @@ void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
   /* 用户代码开始：错误处理调试 */
-  
+
   /* 标准错误处理实现 */
   __disable_irq();  // 禁用所有中断
-  /* 
+  /*
    * __disable_irq()说明：
    * - 关闭全局中断使能
    * - 防止在错误状态下执行中断服务程序
    * - 提高系统安全性
    */
-  
-  /* 可以添加错误指示：快速闪烁LED */
+
+  /* 错误状态指示：死循环 */
   while (1)
   {
-    HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);  // 快速翻转LED
-    HAL_Delay(100);  // 快速闪烁表示错误（100ms周期）
-    /* 
-     * 死循环说明：
-     * - 程序在此处阻塞，无法继续执行
-     * - 可以通过调试器查看程序状态
-     * - LED快速闪烁提供视觉错误指示
-     * - 便于现场调试和故障诊断
-     */
+    /* 程序在此处阻塞，可以通过调试器查看错误原因 */
   }
   /* USER CODE END Error_Handler_Debug */
 }

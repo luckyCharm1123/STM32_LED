@@ -40,7 +40,6 @@ int8_t IR_SENSOR_Init(void)
     ir_sensor_data.state = IR_STATE_NOBODY;
     ir_sensor_data.pin_level = 0;
     ir_sensor_data.last_update_time = HAL_GetTick();
-    ir_sensor_data.detection_count = 0;
 
     ir_last_state = IR_STATE_NOBODY;
     ir_sensor_last_read_time = HAL_GetTick();
@@ -51,9 +50,6 @@ int8_t IR_SENSOR_Init(void)
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
     GPIO_InitStruct.Pull = GPIO_NOPULL;  // 无上拉下拉，传感器自己输出电平
     HAL_GPIO_Init(IR_SENSOR_PORT, &GPIO_InitStruct);
-
-    DEBUG_SendString("[IR_SENSOR] Initialized\r\n");
-
     return 0;
 }
 
@@ -72,12 +68,6 @@ void IR_SENSOR_Process(void)
     ir_sensor_data.pin_level = pin_level;
     ir_sensor_data.state = current_state;
     ir_sensor_data.last_update_time = HAL_GetTick();
-
-    // 如果检测到有人，增加计数
-    if(current_state == IR_STATE_PRESENCE)
-    {
-        ir_sensor_data.detection_count++;
-    }
 
     // 更新读取时间戳（用于外部调用判断）
     ir_sensor_last_read_time = HAL_GetTick();

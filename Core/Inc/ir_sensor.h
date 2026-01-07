@@ -33,7 +33,6 @@ typedef struct {
     IRSensorState_t state;          // 当前状态 (0=无人, 1=有人)
     uint8_t pin_level;              // 引脚电平 (0=低, 1=高)
     uint32_t last_update_time;      // 最后更新时间
-    uint32_t detection_count;       // 检测到"有人"的累计次数
 } IRSensorData_t;
 
 /* ==================== 函数声明 ==================== */

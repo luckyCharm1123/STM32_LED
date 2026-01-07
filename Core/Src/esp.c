@@ -55,6 +55,13 @@ uint32_t esp_last_rx_time = 0;   // ESP最后接收时间
 /* ESP模块状态 */
 ESP_Status_t esp_status = {0};
 
+/* ==================== 状态机实例 ==================== */
+/**
+  * @brief ESP状态机全局实例
+  * @details 管理ESP通信的状态、超时和结果
+  */
+ESP_StateMachine_t esp_fsm = {0};
+
 /* Private function prototypes -----------------------------------------------*/
 void Trail_Rxed(void);
 uint8_t ESP8266_SendCmd(char *cmd, char *res);
@@ -124,10 +131,6 @@ uint8_t ESP8266_SendCmd(char *cmd, char *res)
 				// LED_State(0);
 			}
 		}
-
-		// 输出响应到调试串口
-		UsartPrintf(USART1, RxData);
-		UsartPrintf(USART1, "\r\n");
 
 		// 清空缓冲区
 		DataPointer=0;
@@ -328,12 +331,19 @@ uint8_t ESP_CheckHealth(void)
 /**
   * @brief 处理接收到的ESP数据
   * @retval None
-  * @details 简化实现，STM32-ESP01S项目未使用此功能
+  * @details 处理ESP模块接收到的数据，特别是MQTT消息
   */
 void ESP_ProcessReceivedData(void)
 {
-	// STM32-ESP01S项目使用轮询方式，不处理接收数据
-	// 此函数为空实现，保持API兼容性
+	// 检查是否有ESP接收到的数据（通过中断接收的数据）
+	if(esp_rx_complete)
+	{
+		// 清除接收完成标志
+		esp_rx_complete = 0;
+
+		// 重置接收索引，准备下一次接收
+		esp_rx_index = 0;
+	}
 }
 
 /**
@@ -347,6 +357,276 @@ void ESP_ClearBuffer(void)
 	DataPointer = 0;
 	memset(RxData, 0, DataSize);
 	CompeteRx = 0;
+}
+
+/* ==================== 状态机函数实现 ==================== */
+
+/**
+  * @brief 初始化ESP状态机
+  * @retval None
+  * @details 初始化状态机为IDLE状态，必须在系统启动时调用一次
+  */
+void ESP_FSM_Init(void)
+{
+	esp_fsm.state = ESP_STATE_IDLE;
+	esp_fsm.is_busy = 0;
+	esp_fsm.result = ESP_OK;
+	esp_fsm.expected_response[0] = '\0';
+	esp_fsm.timeout_ms = 0;
+	esp_fsm.start_time = 0;
+}
+
+/**
+  * @brief 检查ESP是否可以接收新命令
+  * @retval 1: 空闲可以发送, 0: 忙碌不能发送
+  */
+uint8_t ESP_IsReady(void)
+{
+	return (esp_fsm.state == ESP_STATE_IDLE) && (esp_fsm.is_busy == 0);
+}
+
+/**
+  * @brief 启动AT命令（非阻塞）
+  * @param cmd: AT命令字符串
+  * @param expected_resp: 期望的响应字符串（如"OK"）
+  * @param timeout_ms: 超时时间（毫秒）
+  * @retval ESP_OK: 命令已启动, ESP_ERROR: 状态机忙碌
+  * @details 立即返回，不等待ESP响应。实际工作由ESP_Process()在后台完成
+  */
+uint8_t ESP_StartCmd(const char *cmd, const char *expected_resp, uint32_t timeout_ms)
+{
+	// 检查状态机是否空闲
+	if(esp_fsm.state != ESP_STATE_IDLE || esp_fsm.is_busy)
+	{
+		return ESP_ERROR;  // 状态机忙碌
+	}
+
+	// 保存期望的响应字符串
+	if(expected_resp != NULL)
+	{
+		strncpy(esp_fsm.expected_response, expected_resp, sizeof(esp_fsm.expected_response) - 1);
+		esp_fsm.expected_response[sizeof(esp_fsm.expected_response) - 1] = '\0';
+	}
+	else
+	{
+		esp_fsm.expected_response[0] = '\0';
+	}
+
+	// 保存超时时间
+	esp_fsm.timeout_ms = timeout_ms;
+	esp_fsm.start_time = HAL_GetTick();
+
+	// 清空接收缓冲区
+	DataPointer = 0;
+	memset(RxData, 0, DataSize);
+	CompeteRx = 0;
+
+	// 发送AT命令到UART（使用HAL库非阻塞发送或短阻塞）
+	// 这里使用短阻塞发送（通常几毫秒），可接受
+	HAL_UART_Transmit(&huart2, (uint8_t *)cmd, strlen((const char *)cmd), 100);
+
+	// 设置状态为SENDING
+	esp_fsm.state = ESP_STATE_SENDING;
+	esp_fsm.is_busy = 1;
+	esp_fsm.result = ESP_ERROR;  // 默认为失败，成功时会在ESP_Process中更新
+
+	return ESP_OK;  // 命令已成功启动
+}
+
+/**
+  * @brief 等待操作完成（阻塞）
+  * @param timeout_ms: 最大等待时间（毫秒）
+  * @retval ESP_OK: 操作成功, ESP_ERROR: 操作失败或超时
+  * @details 用于初始化阶段需要等待完成的场景
+  */
+uint8_t ESP_WaitComplete(uint32_t timeout_ms)
+{
+	uint32_t start = HAL_GetTick();
+
+	// 循环等待操作完成
+	while(esp_fsm.is_busy)
+	{
+		// 检查超时
+		if(HAL_GetTick() - start > timeout_ms)
+		{
+			return ESP_ERROR;  // 超时
+		}
+
+		// 调用状态机处理函数
+		ESP_Process();
+
+		// 短暂延时，避免CPU占用过高
+		HAL_Delay(1);
+	}
+
+	// 返回操作结果
+	return esp_fsm.result;
+}
+
+/**
+  * @brief ESP状态机处理函数（核心）
+  * @retval 0: 处理中, 1: 操作完成（结果在esp_fsm.result中）
+  * @details 必须在主循环中定期调用，处理状态机的所有状态转换
+  * @note 这个函数是非阻塞的，每次调用只处理一小步工作
+  *
+  * 状态机转换流程：
+  * IDLE → SENDING → WAITING_RESPONSE → RESPONSE_READY → IDLE
+  *                                  ↓
+  *                             TIMEOUT → IDLE
+  */
+uint8_t ESP_Process(void)
+{
+	// 如果不在忙状态，直接返回
+	if(!esp_fsm.is_busy)
+	{
+		return 0;  // 无操作可处理
+	}
+
+	// 根据当前状态进行处理
+	switch(esp_fsm.state)
+	{
+		case ESP_STATE_IDLE:
+			// 空闲状态，不应该进入这里
+			esp_fsm.is_busy = 0;
+			return 1;
+
+		case ESP_STATE_SENDING:
+			// === 状态：正在发送命令 ===
+			// UART发送已经在ESP_StartCmd中完成
+			// 检查超时
+			if(HAL_GetTick() - esp_fsm.start_time > esp_fsm.timeout_ms)
+			{
+				esp_fsm.state = ESP_STATE_TIMEOUT;
+				esp_fsm.result = ESP_ERROR;
+			}
+			else
+			{
+				// 转换到等待响应状态
+				esp_fsm.state = ESP_STATE_WAITING_RESPONSE;
+			}
+			return 0;  // 处理中
+
+		case ESP_STATE_WAITING_RESPONSE:
+			// === 状态：等待ESP响应 ===
+
+			// 1. 检查超时
+			if(HAL_GetTick() - esp_fsm.start_time > esp_fsm.timeout_ms)
+			{
+				esp_fsm.state = ESP_STATE_TIMEOUT;
+				esp_fsm.result = ESP_ERROR;
+				esp_fsm.is_busy = 0;
+				return 1;  // 操作完成（失败）
+			}
+
+			// 2. 检查是否接收到数据
+			// 调用Trail_Rxed检查接收是否完成
+			// 注意：Trail_Rxed内部有延时，每次调用只检查一次
+			if(DataPointer > 0)
+			{
+				// 有数据接收，检查是否接收完成
+				uint16_t temp = DataPointer;
+				HAL_Delay(1);
+				if(temp == DataPointer)
+				{
+					// 数据指针没变，再等5ms确认
+					HAL_Delay(5);
+					if(DataPointer == temp)
+					{
+						// 接收完成
+						CompeteRx = 1;
+					}
+				}
+			}
+
+			// 3. 检查接收是否完成
+			if(CompeteRx)
+			{
+				// 接收完成，检查响应内容
+				if(strstr(RxData, esp_fsm.expected_response) != NULL)
+				{
+					// 收到期望的响应
+					esp_fsm.result = ESP_OK;
+					esp_fsm.state = ESP_STATE_RESPONSE_READY;
+				}
+				else
+				{
+					// 收到数据但不包含期望的响应
+					esp_fsm.result = ESP_ERROR;
+					esp_fsm.state = ESP_STATE_RESPONSE_READY;
+				}
+
+				// 清空接收缓冲区
+				DataPointer = 0;
+				memset(RxData, 0, DataSize);
+				CompeteRx = 0;
+
+				esp_fsm.is_busy = 0;
+				return 1;  // 操作完成
+			}
+
+			return 0;  // 处理中
+
+		case ESP_STATE_RESPONSE_READY:
+			// === 状态：响应已准备好 ===
+			// 这个状态会在WAITING_RESPONSE中直接转换完成
+			// 如果单独进入这个状态，说明操作已完成
+			esp_fsm.is_busy = 0;
+			esp_fsm.state = ESP_STATE_IDLE;
+			return 1;  // 操作完成
+
+		case ESP_STATE_TIMEOUT:
+			// === 状态：超时 ===
+			// 清空接收缓冲区
+			DataPointer = 0;
+			memset(RxData, 0, DataSize);
+			CompeteRx = 0;
+
+			esp_fsm.result = ESP_ERROR;
+			esp_fsm.is_busy = 0;
+			esp_fsm.state = ESP_STATE_IDLE;
+			return 1;  // 操作完成（失败）
+
+		default:
+			// 未知状态，重置为IDLE
+			esp_fsm.state = ESP_STATE_IDLE;
+			esp_fsm.is_busy = 0;
+			return 1;
+	}
+}
+
+/* ==================== 状态机函数实现结束 ==================== */
+
+/**
+  * @brief 订阅MQTT主题
+  * @param topic: 要订阅的主题名称
+  * @retval ESP_OK: 成功, ESP_ERROR: 失败
+  * @details 使用AT+MQTTSUB指令订阅MQTT主题
+  *          指令格式: AT+MQTTSUB=<linkID>,"<topic>",<qos>
+  *          参数说明:
+  *          - linkID: 链接ID (0-5), 使用0
+  *          - topic: 订阅的主题名称
+  *          - qos: 服务质量等级 (0=最多一次, 1=至少一次, 2=只有一次), 使用1
+  * @note 订阅成功后，ESP模块会自动接收该主题的消息
+  *       收到的消息格式: +MQTTSUBRECV=<linkID>,"<topic>",<len>,<data>
+  */
+uint8_t ESP_SubscribeMQTT(const char *topic)
+{
+	char cmd[128];
+
+	// 等待MQTT连接稳定
+	HAL_Delay(2000);
+
+	// 构建订阅指令
+	snprintf(cmd, sizeof(cmd), "AT+MQTTSUB=0,\"%s\",1\r\n", topic);
+
+	// 发送订阅指令
+	if(ESP8266_SendCmd(cmd, "OK") == 0)
+	{
+		return ESP_OK;
+	}
+
+	USART2_SendString("[ERR] MQTT subscription failed\r\n");
+	return ESP_ERROR;
 }
 
 /* USER CODE END PF */

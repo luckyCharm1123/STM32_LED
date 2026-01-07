@@ -54,15 +54,12 @@ extern "C" {
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-int _write(int file, char *ptr, int len);
 void DEBUG_SendString(const char *str);
 void USART2_SendString(const char *str);
 void Get_STM32_UID(char *uid_str);  /* 获取STM32唯一ID */
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define LED_Pin GPIO_PIN_6
-#define LED_GPIO_Port GPIOA
 #define USART2_TX_Pin GPIO_PIN_2
 #define USART2_TX_GPIO_Port GPIOA
 #define USART2_RX_Pin GPIO_PIN_3
