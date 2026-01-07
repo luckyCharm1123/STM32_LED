@@ -33,6 +33,9 @@ typedef struct {
 /* 全局状态机实例声明 */
 extern ESP_StateMachine_t esp_fsm;
 
+/* 保存最后一次ESP响应的全局变量声明 */
+extern char esp_last_response[512];
+
 /* ==================== 原有定义 ==================== */
 
 /* ESP模块状态结构体 */
@@ -87,12 +90,6 @@ uint8_t ESP_PublishMQTT(const char *topic, const char *message);
 ESP_Status_t* ESP_GetStatus(void);
 
 /**
-  * @brief 检查ESP模块是否健康（能够响应AT命令）
-  * @retval ESP_OK: 健康, ESP_ERROR: 不健康
-  */
-uint8_t ESP_CheckHealth(void);
-
-/**
   * @brief 处理接收到的ESP数据
   * @retval None
   * @details 简化实现，STM32-ESP01S项目未使用此功能
@@ -113,6 +110,15 @@ void ESP_ClearBuffer(void);
   * @details 使用AT+MQTTSUB指令订阅MQTT主题
   */
 uint8_t ESP_SubscribeMQTT(const char *topic);
+
+/**
+  * @brief 连接WiFi（专门处理CWJAP命令）
+  * @param wifi_ssid: WiFi名称
+  * @param wifi_password: WiFi密码
+  * @retval 0: 成功, 1: 失败
+  * @details WiFi连接可能返回OK或WIFI GOT IP，需要特殊处理
+  */
+uint8_t ESP_ConnectWiFi(const char *wifi_ssid, const char *wifi_password);
 
 /* ==================== 状态机函数声明 ==================== */
 

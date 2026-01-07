@@ -281,29 +281,24 @@ int main(void)
 {
   HAL_Init();
   SystemClock_Config();
-  MX_GPIO_Init();              // 初始化GPIO（LED引脚）
+  MX_GPIO_Init();              // 初始化GPIO
   MX_USART1_UART_Init();       // 初始化USART1（调试串口）
-  MX_USART2_UART_Init();       // 初始化USART2（串口）
+  MX_USART2_UART_Init();       // 初始化USART2（ESP通信串口）
   MX_USART3_UART_Init();       // 初始化USART3（雷达串口）
-
   SHT30_Soft_Init();  // 初始化软件I2C
   HAL_Delay(10);
-
   /* 初始化雷达模块 */
   if(RADAR_Init() != 0)
   {
     DEBUG_SendString("[ERR] Radar init failed\r\n");
   }
-
   /* 初始化红外传感器模块 */
   if(IR_SENSOR_Init() != 0)
   {
     DEBUG_SendString("[ERR] IR Sensor init failed\r\n");
   }
-
   /* 启动串口接收中断，用于接收ESP模块的响应 */
   HAL_UART_Receive_IT(&huart2, &rx_buffer[0], 1);
-
   /* 生成设备码（基于芯片唯一ID） */
   Generate_Device_Code(g_device_code);
   char device_msg[64];
@@ -313,44 +308,22 @@ int main(void)
   DEBUG_SendString(device_msg);
 
   /* ESP初始化 - 使用从STM32-ESP01S移植的简化驱动 */
-  USART2_SendString("\r\n=== ESP01S Initialization ===\r\n");
+  DEBUG_SendString("\r\n=== ESP01S Initialization ===\r\n");
 
   char msg[128];
   snprintf(msg, sizeof(msg), "WiFi: %s\r\n", current_wifi_ssid);
-  USART2_SendString(msg);
+  DEBUG_SendString(msg);
   snprintf(msg, sizeof(msg), "MQTT: %s:%d\r\n", MQTT_SERVER, MQTT_PORT);
-  USART2_SendString(msg);
+  DEBUG_SendString(msg);
   snprintf(msg, sizeof(msg), "Client ID: %s\r\n", g_device_code);
-  USART2_SendString(msg);
-
+  DEBUG_SendString(msg);
   /* 初始化ESP模块并连接WiFi和MQTT */
   /* 使用设备码(g_device_code)作为MQTT客户端ID，确保每台设备唯一 */
-  if(ESP01S_Init(current_wifi_ssid, current_wifi_password,
+  ESP01S_Init(current_wifi_ssid, current_wifi_password,
                  g_device_code, MQTT_USERNAME, MQTT_PASSWORD,
-                 MQTT_SERVER, MQTT_PORT) != ESP_OK)
-  {
-    USART2_SendString("[ERR] ESP01S initialization failed\r\n");
-
-    /* 持续尝试重新初始化 */
-    while(1)
-    {
-      USART2_SendString("\r\n[RETRY] Attempting to reinitialize ESP...\r\n");
-      HAL_Delay(10000);
-
-      if(ESP01S_Init(current_wifi_ssid, current_wifi_password,
-                     g_device_code, MQTT_USERNAME, MQTT_PASSWORD,
-                     MQTT_SERVER, MQTT_PORT) == ESP_OK)
-      {
-        USART2_SendString("[OK] ESP01S reinitialization successful!\r\n");
-        break;
-      }
-    }
-  }
-  else
-  {
-    USART2_SendString("[OK] ESP01S initialized and connected!\r\n");
-  }
-
+                 MQTT_SERVER, MQTT_PORT);
+  DEBUG_SendString("=== WiFi and MQTT Initialized ===\r\n");
+  
   /* 订阅MQTT主题 - 接收服务器下发的消息 */
   USART2_SendString("\r\n=== MQTT Subscription ===\r\n");
   if(ESP_SubscribeMQTT(MQTT_SUBSCRIBE_TOPIC) == ESP_OK)
@@ -391,10 +364,6 @@ int main(void)
   /* MQTT连接失败计数器 */
   uint8_t mqtt_fail_count = 0;
   const uint8_t MQTT_MAX_FAIL = 3;
-
-  /* ESP模块健康监控 - 看门狗机制 */
-  uint8_t esp_not_response_count = 0;  // ESP无响应计数器
-  const uint8_t ESP_MAX_NO_RESPONSE = 5;  // 最大无响应次数，超过则重启设备
 
   /* MQTT连接状态检查定时器 */
   uint32_t mqtt_last_check_time = HAL_GetTick();
@@ -599,46 +568,14 @@ int main(void)
     {
       mqtt_last_check_time = HAL_GetTick();
 
-      /* 检查ESP模块是否响应 */
-      if(ESP_CheckHealth() == ESP_OK)
+      /* ESP模块正常，MQTT连接状态由数据发布的成功/失败来监控 */
+      /* 如果mqtt_fail_count达到阈值，说明持续发布失败，需要重连 */
+      if(mqtt_fail_count >= MQTT_MAX_FAIL)
       {
-        /* ESP模块正常，重置无响应计数器 */
-        esp_not_response_count = 0;
-
-        /* ESP模块正常，MQTT连接状态由数据发布的成功/失败来监控 */
-        /* 如果mqtt_fail_count达到阈值，说明持续发布失败，需要重连 */
-        if(mqtt_fail_count >= MQTT_MAX_FAIL)
-        {
-          USART2_SendString("[WARN] MQTT connection unstable. Will retry on next publish.\r\n");
-          /* MQTT自动重连功能需要在esp.c中实现ESP_ConfigureMQTT等函数 */
-          /* 当前版本简化处理：重置失败计数器，依赖下一次发布尝试 */
-          mqtt_fail_count = 0;
-        }
-      }
-      else
-      {
-        /* ESP模块无响应，增加计数器 */
-        esp_not_response_count++;
-        char error_msg[100];
-        snprintf(error_msg, sizeof(error_msg),
-                 "[ERROR] ESP module not responding! (Count: %d/%d)\r\n",
-                 esp_not_response_count, ESP_MAX_NO_RESPONSE);
-        USART2_SendString(error_msg);
-
-        /* 如果连续无响应次数超过阈值，重启设备 */
-        if(esp_not_response_count >= ESP_MAX_NO_RESPONSE)
-        {
-          USART2_SendString("[CRITICAL] ESP module dead! Rebooting system...\r\n");
-          HAL_Delay(1000);  // 给串口时间发送消息
-
-          /* 重启STM32设备 */
-          NVIC_SystemReset();
-        }
-        else
-        {
-          /* 触发持续重连 */
-          mqtt_fail_count = MQTT_MAX_FAIL;
-        }
+        USART2_SendString("[WARN] MQTT connection unstable. Will retry on next publish.\r\n");
+        /* MQTT自动重连功能需要在esp.c中实现ESP_ConfigureMQTT等函数 */
+        /* 当前版本简化处理：重置失败计数器，依赖下一次发布尝试 */
+        mqtt_fail_count = 0;
       }
     }
 

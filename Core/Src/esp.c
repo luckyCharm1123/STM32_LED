@@ -65,6 +65,7 @@ ESP_StateMachine_t esp_fsm = {0};
 /* Private function prototypes -----------------------------------------------*/
 void Trail_Rxed(void);
 uint8_t ESP8266_SendCmd(char *cmd, char *res);
+uint8_t ESP_SendCmdWithTimeout(const char *cmd, const char *res, uint32_t timeout_ms);
 void ESP01S_Start(const char *wifi_ssid, const char *wifi_password,
                  const char *mqtt_client_id, const char *mqtt_username, const char *mqtt_password,
                  const char *mqtt_server, uint16_t mqtt_port);
@@ -97,41 +98,94 @@ void Trail_Rxed(void)
 }
 
 /**
-  * @brief 发送AT指令并等待响应
+  * @brief 保存最后一次ESP响应的全局变量
+  */
+char esp_last_response[512] = {0};
+
+/**
+  * @brief 发送AT指令并等待响应（带超时）
+  * @param cmd: AT指令字符串
+  * @param res: 期望的响应字符串
+  * @param timeout_ms: 超时时间（毫秒）
+  * @retval 0: 成功, 1: 失败或超时
+  * @details 在指定超时时间内发送AT命令并等待响应，响应保存在esp_last_response中
+  */
+uint8_t ESP_SendCmdWithTimeout(const char *cmd, const char *res, uint32_t timeout_ms)
+{
+	uint32_t start_time = HAL_GetTick();
+
+	while(HAL_GetTick() - start_time < timeout_ms)
+	{
+		if(ESP8266_SendCmd((char *)cmd, (char *)res) == 0)
+		{
+			// 保存响应到全局变量（在ESP8266_SendCmd清空前已保存）
+			return 0;  // 成功
+		}
+	}
+	return 1;  // 超时
+}
+
+/**
+  * @brief 执行ESP初始化步骤（带超时和调试输出）
+  * @param step_num: 步骤编号
+  * @param step_name: 步骤名称
+  * @param cmd: AT命令字符串
+  * @param res: 期望的响应字符串
+  * @param timeout_ms: 超时时间（毫秒）
+  * @param delay_ms: 完成后延时（毫秒）
+  * @retval 0: 成功, 1: 失败或超时
+  * @details 封装了步骤执行、调试输出、超时检查和延时的完整流程
+  */
+uint8_t ESP_ExecuteStep(uint8_t step_num, const char *step_name, const char *cmd,
+                        const char *res, uint32_t timeout_ms, uint32_t delay_ms)
+{
+	char msg[64];
+
+	// 输出步骤信息
+	snprintf(msg, sizeof(msg), "%d.%s\r\n", step_num, step_name);
+	UsartPrintf(USART1, msg);
+
+	// 执行命令（带超时）
+	if(ESP_SendCmdWithTimeout(cmd, res, timeout_ms) != 0)
+	{
+		return 1;  // 失败
+	}
+
+	// 输出成功信息
+	UsartPrintf(USART1, "ready\r\n");
+
+	// 延时
+	if(delay_ms > 0)
+	{
+		HAL_Delay(delay_ms);
+	}
+
+	return 0;  // 成功
+}
+
+/**
+  * @brief 发送AT指令并等待响应（支持多个期望响应）
   * @param cmd: AT指令字符串
   * @param res: 期望的响应字符串
   * @retval 0: 成功收到期望响应, 1: 失败或超时
   * @details 发送AT指令到ESP模块，等待响应并检查是否包含期望字符串
+  *          响应内容会保存到全局变量esp_last_response中
   */
 uint8_t ESP8266_SendCmd(char *cmd, char *res)
 {
-	char* atemp;
-
 	// 使用HAL库发送AT命令
 	HAL_UART_Transmit(&huart2, (uint8_t *)cmd, strlen((const char *)cmd), 1000);
 
 	// 等待接收完成
 	while(CompeteRx==0) Trail_Rxed();
 
+	// 保存响应到全局变量（在清空前保存）
+	strncpy(esp_last_response, RxData, sizeof(esp_last_response) - 1);
+	esp_last_response[sizeof(esp_last_response) - 1] = '\0';
+
 	// 检查响应
 	if(strstr(RxData, res) != NULL)
 	{
-		// 检查是否包含switch控制指令
-		if(strstr(RxData,"switch")!=NULL)
-		{
-			HAL_Delay(2);
-			atemp=strstr(RxData,"switch");
-			if(atemp[8]=='1')
-			{
-				// LED控制 - 这里需要根据实际LED控制函数调整
-				// LED_State(1);
-			}
-			else if(atemp[8]=='0')
-			{
-				// LED_State(0);
-			}
-		}
-
 		// 清空缓冲区
 		DataPointer=0;
 		memset(RxData,0,DataSize);
@@ -148,6 +202,7 @@ uint8_t ESP8266_SendCmd(char *cmd, char *res)
 		return 1;
 	}
 }
+
 
 /**
   * @brief 发布温湿度数据到MQTT服务器
@@ -220,56 +275,52 @@ void ESP01S_Start(const char *wifi_ssid, const char *wifi_password,
                  const char *mqtt_server, uint16_t mqtt_port)
 {
 	char cmd[512];
+	uint32_t step_timeout = 30000;  // 每个步骤30秒超时
 
-	// 步骤1: 恢复出厂设置
-	UsartPrintf(USART1, " RST\r\n");
-	while(ESP8266_SendCmd("AT+RESTORE\r\n", "ready"));
-	HAL_Delay(1500);
+	// 死循环重试，直到所有步骤成功完成
+	while(1)
+	{
+		// 步骤1: 恢复出厂设置
+		if(ESP_ExecuteStep(1, "Start", "AT+RESTORE\r\n", "ready", step_timeout, 1000)) goto restart;
 
-	// 步骤2: AT测试
-	UsartPrintf(USART1, "1.AT\r\n");
-	while(ESP8266_SendCmd("AT\r\n", "OK"));
-	HAL_Delay(1500);
+		// 步骤2: AT测试
+		if(ESP_ExecuteStep(2, "Test AT", "AT\r\n", "OK", step_timeout, 1000)) goto restart;
 
-	// 步骤3: 关闭回显
-	UsartPrintf(USART1, "1.ATE0\r\n");
-	while(ESP8266_SendCmd("ATE0\r\n", "OK"));
-	HAL_Delay(1500);
+		// 步骤3: 关闭回显
+		if(ESP_ExecuteStep(3, "Set ATE0", "ATE0\r\n", "OK", step_timeout, 1000)) goto restart;
 
-	// 步骤4: 设置为Station模式
-	UsartPrintf(USART1, "2.CWMODE\r\n");
-	while(ESP8266_SendCmd("AT+CWMODE=1\r\n","OK"));
-	HAL_Delay(1500);
+		// 步骤4: 设置为Station模式
+		if(ESP_ExecuteStep(4, "Set CWMODE", "AT+CWMODE=1\r\n", "OK", step_timeout, 100)) goto restart;
 
-	// 步骤5: 断开之前的WiFi连接
-	UsartPrintf(USART1, "2.CWQAP\r\n");
-	while(ESP8266_SendCmd("AT+CWQAP\r\n","OK"));
-	HAL_Delay(1500);
+		// 步骤5: 断开之前的WiFi连接
+		if(ESP_ExecuteStep(5, "CWQAP", "AT+CWQAP\r\n", "OK", step_timeout, 3000)) goto restart;
 
-	// 步骤6: 连接WiFi
-	UsartPrintf(USART1, "3.CWJAP\r\n");
-	snprintf(cmd, sizeof(cmd), "AT+CWJAP=\"%s\",\"%s\"\r\n", wifi_ssid, wifi_password);
-	while(ESP8266_SendCmd(cmd, "OK"));
-	HAL_Delay(1500);
+		// 步骤6: 连接WiFi
+		snprintf(cmd, sizeof(cmd), "AT+CWJAP=\"%s\",\"%s\"\r\n", wifi_ssid, wifi_password);
+		if(ESP_ExecuteStep(6, "CWJAP", cmd, "OK", step_timeout, 1000)) goto restart;
 
-	// 步骤7: 配置MQTT用户参数
-	UsartPrintf(USART1, "4.MQTTUSERCFG\r\n");
-	snprintf(cmd, sizeof(cmd), "AT+MQTTUSERCFG=0,1,\"NULL\",\"%s\",\"%s\",0,0,\"\"\r\n",
-	        mqtt_username, mqtt_password);
-	while(ESP8266_SendCmd(cmd, "OK"));
-	HAL_Delay(1500);
+		// 步骤7: 配置MQTT用户参数
+		snprintf(cmd, sizeof(cmd), "AT+MQTTUSERCFG=0,1,\"NULL\",\"%s\",\"%s\",0,0,\"\"\r\n",
+		        mqtt_username, mqtt_password);
+		if(ESP_ExecuteStep(7, "MQTTUSERCFG", cmd, "OK", step_timeout, 100)) goto restart;
 
-	// 步骤8: 设置MQTT客户端ID
-	UsartPrintf(USART1, "5.MQTTCLIENTID\r\n");
-	snprintf(cmd, sizeof(cmd), "AT+MQTTCLIENTID=0,\"%s\"\r\n", mqtt_client_id);
-	while(ESP8266_SendCmd(cmd, "OK"));
-	HAL_Delay(10000);
+		// 步骤8: 设置MQTT客户端ID
+		snprintf(cmd, sizeof(cmd), "AT+MQTTCLIENTID=0,\"%s\"\r\n", mqtt_client_id);
+		if(ESP_ExecuteStep(8, "MQTTCLIENTID", cmd, "OK", step_timeout, 500)) goto restart;
 
-	// 步骤9: 连接MQTT服务器
-	UsartPrintf(USART1, "6.MQTTCONN\r\n");
-	snprintf(cmd, sizeof(cmd), "AT+MQTTCONN=0,\"%s\",%d,0\r\n", mqtt_server, mqtt_port);
-	while(ESP8266_SendCmd(cmd, "OK"));
-	HAL_Delay(500);
+		// 步骤9: 连接MQTT服务器
+		snprintf(cmd, sizeof(cmd), "AT+MQTTCONN=0,\"%s\",%d,0\r\n", mqtt_server, mqtt_port);
+		if(ESP_ExecuteStep(9, "MQTTCONN", cmd, "OK", step_timeout, 100)) goto restart;
+
+		// 所有步骤成功完成，退出循环
+		break;
+
+	restart:
+		// 任何步骤超时，都会跳转到这里
+		UsartPrintf(USART1, "\r\n[TIMEOUT] Step failed, restarting...\r\n");
+		HAL_Delay(1000);  // 等待1秒后重试
+		// 继续while循环，重新开始
+	}
 }
 
 /**
@@ -288,11 +339,8 @@ uint8_t ESP01S_Init(const char *wifi_ssid, const char *wifi_password,
                     const char *mqtt_client_id, const char *mqtt_username, const char *mqtt_password,
                     const char *mqtt_server, uint16_t mqtt_port)
 {
-	// 注意：USART2已在main.c中初始化，这里不需要再次初始化
-
 	// 等待ESP模块上电稳定
-	HAL_Delay(3000);
-
+	HAL_Delay(1000);
 	// 执行ESP启动配置流程
 	ESP01S_Start(wifi_ssid, wifi_password, mqtt_client_id, mqtt_username, mqtt_password,
 	            mqtt_server, mqtt_port);
@@ -312,20 +360,6 @@ uint8_t ESP01S_Init(const char *wifi_ssid, const char *wifi_password,
 ESP_Status_t* ESP_GetStatus(void)
 {
 	return &esp_status;
-}
-
-/**
-  * @brief 检查ESP模块是否健康（能够响应AT命令）
-  * @retval ESP_OK: 健康, ESP_ERROR: 不健康
-  */
-uint8_t ESP_CheckHealth(void)
-{
-	// 发送AT命令测试
-	if(ESP8266_SendCmd("AT\r\n", "OK") == 0)
-	{
-		return ESP_OK;
-	}
-	return ESP_ERROR;
 }
 
 /**
