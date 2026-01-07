@@ -20,7 +20,7 @@
 #include <string.h>
 
 /* 外部变量声明 */
-extern void USART2_SendString(const char *str);
+extern void DEBUG_SendString(const char *str);
 
 /* ==================== 私有变量 ==================== */
 
@@ -63,7 +63,7 @@ void MQTT_Manager_Init(void)
     mqtt_mgr.rapid_send_count = 0;
     mqtt_mgr.fail_count = 0;
 
-    USART2_SendString("[MQTT Manager] Initialized\r\n");
+    DEBUG_SendString("[MQTT Manager] Initialized\r\n");
 }
 
 /**
@@ -219,7 +219,7 @@ uint8_t MQTT_Manager_SendSensorData(const MQTT_SensorData_t *sensor_data)
                  sensor_data->motion_detected,
                  sensor_data->ir_status,
                  mqtt_mgr.rapid_send_count, mqtt_mgr.max_rapid_send);
-        USART2_SendString(debug_msg);
+        DEBUG_SendString(debug_msg);
 
         return ESP_OK;
     }
@@ -232,7 +232,7 @@ uint8_t MQTT_Manager_SendSensorData(const MQTT_SensorData_t *sensor_data)
         snprintf(error_msg, sizeof(error_msg),
                  "[MQTT] Send failed (Count: %d/%d)\r\n",
                  mqtt_mgr.fail_count, mqtt_mgr.max_fail_count);
-        USART2_SendString(error_msg);
+        DEBUG_SendString(error_msg);
 
         return ESP_ERROR;
     }

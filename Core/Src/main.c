@@ -33,10 +33,6 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "stm32f1xx_hal_def.h"
-
-/* Private includes ----------------------------------------------------------*/
-/* USER CODE BEGIN Includes */
-/* 用户代码开始：包含头文件 */
 #include <stdio.h>  // 用于printf重定向，实现标准输出到串口
 #include <string.h> // 用于字符串操作，如strlen、strncmp、memset等
 #include <stdlib.h> // 用于atoi函数，字符串转整数
@@ -46,17 +42,6 @@
 #include "radar.h"  // 毫米波雷达驱动
 #include "ir_sensor.h"  // 红外传感器驱动
 #include "mqtt_manager.h"  // MQTT发送管理器
-/* USER CODE END Includes */
-
-/* Private typedef -----------------------------------------------------------*/
-/* USER CODE BEGIN PTD */
-/* 用户代码开始：私有类型定义 */
-/* 可以在此处定义自定义的数据结构类型 */
-/* USER CODE END PTD */
-
-/* Private define ------------------------------------------------------------*/
-/* USER CODE BEGIN PD */
-/* 用户代码开始：私有定义 */
 #define RX_BUFFER_SIZE 128  // 接收缓冲区大小，最大可接收127个字符+1个结束符
 #define TX_BUFFER_SIZE 128  // 发送缓冲区大小，预留128字节
 #define ESP_RX_BUFFER_SIZE 512  // ESP接收缓冲区大小（与esp.c中一致）
@@ -120,13 +105,6 @@ static void MX_USART3_UART_Init(void); // USART3初始化函数声明（雷达�
 void DEBUG_SendString(const char *str);    // USART1调试串口发送函数原型
 void Get_STM32_UID(char *uid_str);         // 获取STM32芯片唯一ID
 void Generate_Device_Code(char *device_code);  // 生成8位设备码
-/* USER CODE END PFP */
-
-/* Private user code ---------------------------------------------------------*/
-/* 私有用户代码 */
-/* USER CODE BEGIN 0 */
-/* 用户代码开始：第0区 */
-
 /**
   * @brief USART1发送调试信息
   * @param str: 要发送的调试字符串，以'\0'结尾
@@ -139,21 +117,6 @@ void DEBUG_SendString(const char *str)
   HAL_UART_Transmit(&huart1, (uint8_t*)str, strlen(str), HAL_MAX_DELAY);
 }
 
-/* USER CODE END 0 */
-
-/**
-  * @brief  The application entry point. 应用程序入口点
-  * @details 这是C程序的主函数，程序从这里开始执行
-  *          执行流程：
-  *          1. 硬件初始化（HAL库初始化）
-  *          2. 系统时钟配置
-  *          3. 外设初始化（GPIO、USART2）
-  *          4. 发送启动信息
-  *          5. 进入主循环，处理串口数据和LED闪烁
-  * @retval int 返回值
-  *         - 0: 程序正常退出（理论上不会执行到这里）
-  *         - 其他值: 错误代码
-  */
 int main(void)
 {
   HAL_Init();
@@ -218,223 +181,13 @@ int main(void)
   DEBUG_SendString("[SYSTEM] Initialization Successful\r\n\r\n");
 
 
-
-
-
-  uint32_t sensor_last_read_time = HAL_GetTick();
-  float sht30_temp, sht30_humi;
-  float last_temp = 0.0f;  // 上次温度值
-  float last_humi = 0.0f;  // 上次湿度值
-
-  /* 智能发送频率控制 */
-  uint8_t rapid_send_count = 0;      // 快速发送计数器（0-10次）
-  const uint8_t MAX_RAPID_SEND = 10;  // 最大快速发送次数
-  uint32_t rapid_send_interval = 3000;  // 快速发送间隔：3秒
-  uint32_t normal_send_interval = 15000; // 正常发送间隔：15秒
-
-  /* MQTT连接失败计数器 */
-  uint8_t mqtt_fail_count = 0;
-  const uint8_t MQTT_MAX_FAIL = 3;
-
-  /* MQTT连接状态检查定时器 */
-  uint32_t mqtt_last_check_time = HAL_GetTick();
-  const uint32_t MQTT_CHECK_INTERVAL = 60000;  // 每60秒检查一次MQTT连接状态
-
-  /* ESP缓冲区清理定时器 */
-  uint32_t esp_buffer_clean_time = HAL_GetTick();
-  const uint32_t ESP_BUFFER_CLEAN_INTERVAL = 10000;  // 每10秒清理一次缓冲区
-
   while (1)
   {
-    /* USER CODE END WHILE */
     
-    /* 定期清理ESP接收缓冲区，防止数据堆积 */
-    if(HAL_GetTick() - esp_buffer_clean_time >= ESP_BUFFER_CLEAN_INTERVAL)
-    {
-      ESP_ClearBuffer();
-      esp_buffer_clean_time = HAL_GetTick();
-    }
-    /* 处理ESP接收到的数据 - 显示MQTT消息并处理WiFi配置更新 */
-    if(esp_rx_complete)
-    {
-      /* 先处理WiFi配置更新（如果消息中包含wifiname_） */
-      if(strstr((char*)esp_rx_buffer, "+MQTTSUBRECV") != NULL)
-      {
-        /* 查找消息内容中的WiFi配置信息 */
-        /* 格式: wifiname_新SSID_password_新密码 */
-        char *wifiname_pos = strstr((char*)esp_rx_buffer, "wifiname_");
-        if(wifiname_pos != NULL)
-        {
-          wifiname_pos += 9;  // 跳过 "wifiname_"
-          char *password_pos = strstr(wifiname_pos, "_password_");
-          if(password_pos != NULL)
-          {
-            /* 先备份当前WiFi配置（在修改之前） */
-            strncpy(old_wifi_ssid, current_wifi_ssid, sizeof(old_wifi_ssid));
-            strncpy(old_wifi_password, current_wifi_password, sizeof(old_wifi_password));
 
-            /* 提取新的SSID */
-            int ssid_len = password_pos - wifiname_pos;
-            if(ssid_len > 0 && ssid_len < 64)
-            {
-              strncpy(current_wifi_ssid, wifiname_pos, ssid_len);
-              current_wifi_ssid[ssid_len] = '\0';
-
-              /* 提取新的密码 */
-              password_pos += 10;  // 跳过 "_password_"
-              char *password_end = password_pos;
-              while(*password_end && *password_end != '\r' &&
-                    *password_end != '\n' && *password_end != '"')
-              {
-                password_end++;
-              }
-              int pass_len = password_end - password_pos;
-              if(pass_len > 0 && pass_len < 64)
-              {
-                /* 更新为新WiFi密码 */
-                strncpy(current_wifi_password, password_pos, pass_len);
-                current_wifi_password[pass_len] = '\0';
-
-                /* 设置更新标志 */
-                wifi_config_updated = 1;
-
-                char update_msg[200];
-                snprintf(update_msg, sizeof(update_msg),
-                         "[INFO] WiFi config updated - Old: %s, New: %s\r\n",
-                         old_wifi_ssid, current_wifi_ssid);
-                USART2_SendString(update_msg);
-              }
-            }
-          }
-        }
-      }
-
-      /* 所有ESP接收到的数据都发送到调试串口 */
-      ESP_ProcessReceivedData();
-    }
-
-    /* 智能传感器数据读取和发送 */
-    /* 策略：温湿度数据已合并到雷达消息中发送 */
-    /* 注意：温湿度读取和检测逻辑保留，但不单独发送MQTT消息 */
-    uint32_t current_interval;
-
-    if(rapid_send_count < MAX_RAPID_SEND)
-    {
-      current_interval = rapid_send_interval;  // 快速发送模式：3秒
-    }
-    else
-    {
-      current_interval = normal_send_interval;  // 正常发送模式：15秒
-    }
-
-    if(HAL_GetTick() - sensor_last_read_time >= current_interval)
-    {
-      /* 读取SHT30温湿度（用于状态检测，MQTT发送由雷达模块负责） */
-      uint8_t ret = SHT30_Soft_Read(&sht30_temp, &sht30_humi);
-
-      if(ret == 0)
-      {
-        /* 检测状态变化（温度或湿度变化超过阈值）*/
-        #define TEMP_THRESHOLD 0.5f  // 温度变化阈值：0.5°C
-        #define HUMI_THRESHOLD 2.0f  // 湿度变化阈值：2%
-
-        uint8_t state_changed = 0;
-
-        /* 首次读取或状态变化 */
-        if(last_temp == 0.0f && last_humi == 0.0f)
-        {
-          /* 首次读取，视为状态变化 */
-          state_changed = 1;
-        }
-        else
-        {
-          /* 检查温度变化 */
-          if((sht30_temp - last_temp) >= TEMP_THRESHOLD ||
-             (last_temp - sht30_temp) >= TEMP_THRESHOLD)
-          {
-            state_changed = 1;
-          }
-
-          /* 检查湿度变化 */
-          if((sht30_humi - last_humi) >= HUMI_THRESHOLD ||
-             (last_humi - sht30_humi) >= HUMI_THRESHOLD)
-          {
-            state_changed = 1;
-          }
-        }
-
-        /* 状态改变时重置快速发送计数器 */
-        if(state_changed)
-        {
-          if(rapid_send_count >= MAX_RAPID_SEND)
-          {
-            char state_msg[80];
-            snprintf(state_msg, sizeof(state_msg),
-                     "[STATE] Changed! T:%.1f->%.1f H:%.1f->%.1f\r\n",
-                     last_temp, sht30_temp, last_humi, sht30_humi);
-            USART2_SendString(state_msg);
-          }
-          rapid_send_count = 0;  // 重置为快速发送模式
-        }
-
-        /* 保存当前值 */
-        last_temp = sht30_temp;
-        last_humi = sht30_humi;
-
-        /* 输出到串口 */
-        int temp_int = (int)sht30_temp;
-        int temp_dec = (int)((sht30_temp - temp_int) * 100);
-        int humi_int = (int)sht30_humi;
-        int humi_dec = (int)((sht30_humi - humi_int) * 100);
-
-        char debug_str[60];
-        snprintf(debug_str, sizeof(debug_str),
-                 "T:%d.%02d H:%d.%02d [%d/%d]\r\n",
-                 temp_int, temp_dec, humi_int, humi_dec,
-                 rapid_send_count, MAX_RAPID_SEND);
-        USART2_SendString(debug_str);
-
-        /* 温湿度MQTT发送已移到雷达模块中合并发送 */
-        /* 此处不再单独发送温湿度数据 */
-
-        /* 增加快速发送计数器 */
-        if(rapid_send_count < MAX_RAPID_SEND)
-        {
-          rapid_send_count++;
-        }
-      }
-
-      sensor_last_read_time = HAL_GetTick();
-    }
-
-    /* 处理雷达数据（包含红外传感器融合） */
-    RADAR_Process();
-
-    /* 定期检查MQTT连接状态并自动恢复 */
-    /* 注意：由于雷达数据发布会不断重置mqtt_fail_count，只有在发布真正失败时才会触发重连 */
-    if(HAL_GetTick() - mqtt_last_check_time >= MQTT_CHECK_INTERVAL)
-    {
-      mqtt_last_check_time = HAL_GetTick();
-
-      /* ESP模块正常，MQTT连接状态由数据发布的成功/失败来监控 */
-      /* 如果mqtt_fail_count达到阈值，说明持续发布失败，需要重连 */
-      if(mqtt_fail_count >= MQTT_MAX_FAIL)
-      {
-        USART2_SendString("[WARN] MQTT connection unstable. Will retry on next publish.\r\n");
-        /* MQTT自动重连功能需要在esp.c中实现ESP_ConfigureMQTT等函数 */
-        /* 当前版本简化处理：重置失败计数器，依赖下一次发布尝试 */
-        mqtt_fail_count = 0;
-      }
-    }
-
-    /* 短暂延时，避免CPU空转，但不阻塞ESP数据处理 */
-    HAL_Delay(10);  // 10ms延时，确保ESP数据能及时处理
-    
-    /* USER CODE BEGIN 3 */
-    /* 用户代码开始：第3区 */
-    /* 可以在此处添加循环体内的自定义代码 */
+    /* 短暂延时，避免CPU空转 */
+    HAL_Delay(10);
   }
-  /* USER CODE END 3 */
 }
 
 /**
@@ -546,58 +299,6 @@ static void MX_USART1_UART_Init(void)
   /* 用户代码开始：USART1初始化第2区 */
   /* USER CODE END USART1_Init 2 */
 }
-
-/**
-  * @brief I2C1 Initialization Function I2C1初始化函数
-  * @param None 无参数
-  * @retval None 无返回值
-  * @details 配置I2C1参数：
-  *          - 时钟速度：100kHz（标准模式）
-  *          - 寻址模式：7位地址
-  *          - 占空比：2:1
-  *          - 引脚：SCL=PB6, SDA=PB7
-  * @note I2C1挂载在APB1总线上，用于连接SHT30温湿度传感器
-  * @note 已改用软件I2C，此函数不再使用
-  */
-#if 0  // 已改用软件I2C，不再使用硬件I2C
-static void MX_I2C1_Init(void)
-{
-  /* USER CODE BEGIN I2C1_Init 0 */
-  /* 用户代码开始：I2C1初始化第0区 */
-  /* USER CODE END I2C1_Init 0 */
-
-  /* USER CODE BEGIN I2C1_Init 1 */
-  /* 用户代码开始：I2C1初始化第1区 */
-  /* USER CODE END I2C1_Init 1 */
-
-  /* 强制复位I2C1外设 */
-  __HAL_RCC_I2C1_FORCE_RESET();
-  HAL_Delay(10);
-  __HAL_RCC_I2C1_RELEASE_RESET();
-  HAL_Delay(10);
-  
-  /* 配置I2C1句柄参数 */
-  hi2c1.Instance = I2C1;                         // I2C1实例
-  hi2c1.Init.ClockSpeed = 10000;                 // 时钟速度：10kHz（降低速度提高稳定性）
-  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;        // 占空比：2:1
-  hi2c1.Init.OwnAddress1 = 0;                    // 自身地址（主机模式不使用）
-  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;  // 7位地址模式
-  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE; // 禁用双地址模式
-  hi2c1.Init.OwnAddress2 = 0;                    // 第二地址（未使用）
-  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE; // 禁用广播呼叫
-  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;     // 禁用时钟延展禁止
-  
-  /* 应用I2C1配置 */
-  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
-  {
-    Error_Handler();  // 如果初始化失败，调用错误处理函数
-  }
-  
-  /* USER CODE BEGIN I2C1_Init 2 */
-  /* 用户代码开始：I2C1初始化第2区 */
-  /* USER CODE END I2C1_Init 2 */
-}
-#endif  // 硬件I2C已禁用
 
 /**
   * @brief USART2 Initialization Function USART2初始化函数
@@ -776,10 +477,6 @@ void Generate_Device_Code(char *device_code)
   *       2. 接收到数据后触发USART2_IRQHandler
   *       3. HAL_UART_IRQHandler处理中断并调用此回调函数
   *       4. 在回调函数中处理数据并准备下一次接收
-  * @note 双模式接收机制：
-  *       - 用户命令模式：接收用户输入的控制命令，以回车/换行结束
-  *       - ESP数据模式：直接接收ESP模块的响应数据，以回车/换行结束
-  *       - 通过esp_mode标志切换两种模式
   */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
