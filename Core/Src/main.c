@@ -45,6 +45,7 @@
 #include "sht30_soft.h"  // SHT30温湿度传感器驱动（软件I2C版本）
 #include "radar.h"  // 毫米波雷达驱动
 #include "ir_sensor.h"  // 红外传感器驱动
+#include "mqtt_manager.h"  // MQTT发送管理器
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -73,18 +74,6 @@
 #define MQTT_SERVER    "156.233.227.40"  // MQTT服务器地址
 #define MQTT_PORT      1588               // MQTT服务器端口
 #define MQTT_SSL       0                  // SSL标志 (0=不启用, 1=启用)
-
-/* Flash配置存储 - 使用最后一页(Page 63, 1KB) */
-#define FLASH_CONFIG_ADDR    0x0800FC00  // Flash最后一页起始地址 (64KB - 1KB)
-#define CONFIG_MAGIC_NUMBER  0x12345678  // 配置有效性标识
-
-/* WiFi配置结构体 */
-typedef struct {
-  uint32_t magic;           // 魔术字，用于验证配置有效性
-  char ssid[64];            // WiFi SSID
-  char password[64];        // WiFi密码
-  uint32_t checksum;        // 校验和
-} WiFiConfig_t;
 
 UART_HandleTypeDef huart1;  // USART1句柄，用于调试输出（PA9/PA10，115200）
 UART_HandleTypeDef huart2;  // USART2句柄，用于管理串口2的所有操作
@@ -129,10 +118,6 @@ static void MX_USART3_UART_Init(void); // USART3初始化函数声明（雷达�
 /* USER CODE BEGIN PFP */
 /* 用户代码开始：私有函数原型 */
 void DEBUG_SendString(const char *str);    // USART1调试串口发送函数原型
-void USART2_SendString(const char *str);   // 串口发送字符串函数原型
-uint8_t WiFiConfig_Load(WiFiConfig_t *config);     // 从Flash加载WiFi配置
-uint8_t WiFiConfig_Save(WiFiConfig_t *config);     // 保存WiFi配置到Flash
-uint32_t WiFiConfig_CalculateChecksum(WiFiConfig_t *config);  // 计算配置校验和
 void Get_STM32_UID(char *uid_str);         // 获取STM32芯片唯一ID
 void Generate_Device_Code(char *device_code);  // 生成8位设备码
 /* USER CODE END PFP */
@@ -141,20 +126,6 @@ void Generate_Device_Code(char *device_code);  // 生成8位设备码
 /* 私有用户代码 */
 /* USER CODE BEGIN 0 */
 /* 用户代码开始：第0区 */
-
-/**
-  * @brief USART2发送字符串
-  * @param str: 要发送的字符串，以'\0'结尾
-  * @retval None
-  * @details 封装了字符串发送功能，自动计算字符串长度
-  *          使用阻塞方式发送，确保数据完整发送
-  */
-void USART2_SendString(const char *str)
-{
-  // strlen计算字符串长度（不包括结束符）
-  // HAL_UART_Transmit使用阻塞模式发送
-  HAL_UART_Transmit(&huart2, (uint8_t*)str, strlen(str), HAL_MAX_DELAY);
-}
 
 /**
   * @brief USART1发送调试信息
@@ -166,100 +137,6 @@ void USART2_SendString(const char *str)
 void DEBUG_SendString(const char *str)
 {
   HAL_UART_Transmit(&huart1, (uint8_t*)str, strlen(str), HAL_MAX_DELAY);
-}
-
-/**
-  * @brief 计算WiFi配置校验和
-  * @param config: WiFi配置结构体指针
-  * @retval 校验和值
-  */
-uint32_t WiFiConfig_CalculateChecksum(WiFiConfig_t *config)
-{
-  uint32_t sum = 0;
-  sum += config->magic;
-  for(int i = 0; i < 64; i++) sum += config->ssid[i];
-  for(int i = 0; i < 64; i++) sum += config->password[i];
-  return sum;
-}
-
-/**
-  * @brief 从Flash加载WiFi配置
-  * @param config: WiFi配置结构体指针
-  * @retval 0:成功, 1:失败
-  */
-uint8_t WiFiConfig_Load(WiFiConfig_t *config)
-{
-  /* 从Flash读取配置 */
-  WiFiConfig_t *flash_config = (WiFiConfig_t*)FLASH_CONFIG_ADDR;
-  
-  /* 检查魔术字 */
-  if(flash_config->magic != CONFIG_MAGIC_NUMBER)
-  {
-    USART2_SendString("[INFO] No valid config in Flash, using defaults\r\n");
-    return 1;
-  }
-  
-  /* 复制配置 */
-  memcpy(config, flash_config, sizeof(WiFiConfig_t));
-  
-  /* 验证校验和 */
-  uint32_t calculated_checksum = WiFiConfig_CalculateChecksum(config);
-  if(calculated_checksum != config->checksum)
-  {
-    USART2_SendString("[WARN] Config checksum error, using defaults\r\n");
-    return 1;
-  }
-  
-  USART2_SendString("[OK] Loaded WiFi config from Flash\r\n");
-  return 0;
-}
-
-/**
-  * @brief 保存WiFi配置到Flash
-  * @param config: WiFi配置结构体指针
-  * @retval 0:成功, 1:失败
-  */
-uint8_t WiFiConfig_Save(WiFiConfig_t *config)
-{
-  HAL_FLASH_Unlock();
-  
-  /* 擦除最后一页 */
-  FLASH_EraseInitTypeDef erase_init;
-  uint32_t page_error = 0;
-  
-  erase_init.TypeErase = FLASH_TYPEERASE_PAGES;
-  erase_init.PageAddress = FLASH_CONFIG_ADDR;
-  erase_init.NbPages = 1;
-  
-  if(HAL_FLASHEx_Erase(&erase_init, &page_error) != HAL_OK)
-  {
-    HAL_FLASH_Lock();
-    USART2_SendString("[ERR] Flash erase failed\r\n");
-    return 1;
-  }
-  
-  /* 计算校验和 */
-  config->magic = CONFIG_MAGIC_NUMBER;
-  config->checksum = WiFiConfig_CalculateChecksum(config);
-  
-  /* 写入配置 */
-  uint32_t *src = (uint32_t*)config;
-  uint32_t addr = FLASH_CONFIG_ADDR;
-  
-  for(uint32_t i = 0; i < sizeof(WiFiConfig_t) / 4; i++)
-  {
-    if(HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, addr, src[i]) != HAL_OK)
-    {
-      HAL_FLASH_Lock();
-      USART2_SendString("[ERR] Flash write failed\r\n");
-      return 1;
-    }
-    addr += 4;
-  }
-  
-  HAL_FLASH_Lock();
-  USART2_SendString("[OK] WiFi config saved to Flash\r\n");
-  return 0;
 }
 
 /* USER CODE END 0 */
@@ -334,21 +211,16 @@ int main(void)
   }
   else
   {
-    DEBUG_SendString("[WARN] MQTT subscription failed, will retry...\r\n");
+    DEBUG_SendString("[WARN] MQTT subscription failed\r\n");
   }
+  MQTT_Manager_Init();  
+  DEBUG_SendString("[MQTT] Initialization Successful\r\n\r\n");
+  DEBUG_SendString("[SYSTEM] Initialization Successful\r\n\r\n");
 
-  /* 温湿度数据已合并到雷达消息中，不再单独发送初始数据 */
 
-  USART2_SendString("\r\n[OK] Ready\r\n");
-  DEBUG_SendString("[SYSTEM] Will continuously process MQTT messages\r\n\r\n");
 
-  /* USER CODE END 2 */
 
-  /* Infinite loop */
-  /* 无限循环 */
-  /* USER CODE BEGIN WHILE */
 
-  /* 传感器读取控制变量 - 统一管理 */
   uint32_t sensor_last_read_time = HAL_GetTick();
   float sht30_temp, sht30_humi;
   float last_temp = 0.0f;  // 上次温度值
@@ -382,7 +254,6 @@ int main(void)
       ESP_ClearBuffer();
       esp_buffer_clean_time = HAL_GetTick();
     }
-    
     /* 处理ESP接收到的数据 - 显示MQTT消息并处理WiFi配置更新 */
     if(esp_rx_complete)
     {
@@ -441,29 +312,7 @@ int main(void)
       /* 所有ESP接收到的数据都发送到调试串口 */
       ESP_ProcessReceivedData();
     }
-    
-    /* 处理WiFi配置更新 */
-    /* 注意：WiFi动态重连功能需要实现ESP_ConnectWiFi等函数 */
-    /* 当前版本暂不支持运行时WiFi配置更改，需要重启设备 */
-    if(wifi_config_updated)
-    {
-      wifi_config_updated = 0;
-      USART2_SendString("[INFO] WiFi config updated. Reboot to apply changes.\r\n");
 
-      /* 保存新WiFi配置到Flash，下次启动时使用 */
-      WiFiConfig_t new_config;
-      memset(&new_config, 0, sizeof(new_config));
-      strncpy(new_config.ssid, current_wifi_ssid, sizeof(new_config.ssid));
-      strncpy(new_config.password, current_wifi_password, sizeof(new_config.password));
-      WiFiConfig_Save(&new_config);
-
-      /* 发布提示消息 */
-      if(ESP_PublishMQTT(MQTT_SUBSCRIBE_TOPIC, "WiFi config saved. Please reboot device.") == ESP_OK)
-      {
-        USART2_SendString("[OK] Published WiFi config update message\r\n");
-      }
-    }
-    
     /* 智能传感器数据读取和发送 */
     /* 策略：温湿度数据已合并到雷达消息中发送 */
     /* 注意：温湿度读取和检测逻辑保留，但不单独发送MQTT消息 */

@@ -649,14 +649,14 @@ uint8_t ESP_SubscribeMQTT(const char *topic)
 	// 构建订阅指令
 	snprintf(cmd, sizeof(cmd), "AT+MQTTSUB=0,\"%s\",1\r\n", topic);
 
-	// 发送订阅指令
-	if(ESP8266_SendCmd(cmd, "OK") == 0)
+	// 发送订阅指令（使用更长的超时时间）
+	if(ESP_SendCmdWithTimeout(cmd, "OK", 10000) == 0)
 	{
 		return ESP_OK;
 	}
-
-	UsartPrintf(USART1,"[ERR] MQTT subscription failed\r\n");
-	return ESP_ERROR;
+	else {
+		return ESP_ERROR;
+	}
 }
 
 /* USER CODE END PF */
