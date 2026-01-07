@@ -1,87 +1,57 @@
 /**
-  ******************************************************************************
-  * @file    radar.c
-  * @brief   毫米波雷达传感器驱动实现
-  * @author  Auto-generated
-  * @date    2025-01-05
-  ******************************************************************************
-  */
+ ******************************************************************************
+ * @file    radar.c
+ * @brief   毫米波雷达驱动实现 (DMA + 空闲中断方案)
+ * @details 基于 STM32 HAL 库的 HAL_UARTEx_ReceiveToIdle_DMA 实现
+ *          适用于 STM32F103C8T6，USART3 (PB10/PB11)
+ *
+ * @note    实现要点：
+ *          - DMA循环模式接收，无需手动重启
+ *          - 空闲中断触发时搬运数据到解析缓冲区
+ *          - 中断中只做memcpy，不做浮点运算
+ *          - 主循环中处理和输出数据
+ ******************************************************************************
+ */
 
+/* Includes ------------------------------------------------------------------*/
 #include "radar.h"
-#include "ir_sensor.h"
-#include "esp.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <inttypes.h>  /* 用于PRIu32等格式化宏 */
 
-/* ==================== 外部变量 ==================== */
-extern UART_HandleTypeDef huart3;  // USART3句柄
-extern char g_device_code[9];      // 全局设备码（在main.c中定义）
+/* Private defines -----------------------------------------------------------*/
+#define RADAR_DEBUG_BUFFER_SIZE   512  /* 调试输出缓冲区大小 */
+#define RADAR_FRAME_TIMEOUT_MS    50   /* 帧超时时间（毫秒） - 超过此时间无新数据则认为一帧结束 */
 
-/* 外部函数声明 */
-extern uint8_t SHT30_Soft_Read(float *temp, float *humi);  // 温湿度传感器读取函数
+/* Private variables ---------------------------------------------------------*/
+Radar_t Radar = {0};
 
-/* ==================== 私有变量 ==================== */
-static uint8_t radar_rx_buffer[RADAR_RX_BUFFER_SIZE];        // 雷达接收缓冲区(中断接收用)
-static uint16_t radar_rx_index = 0;                          // 雷达接收索引
-static volatile uint8_t radar_rx_ready = 0;                   // 雷达接收完成标志
-static uint8_t radar_rx_byte;                                // 雷达单字节接收缓冲区
-static char radar_processed_buffer[RADAR_PROCESSED_BUFFER_SIZE]; // 已处理的数据缓冲区
-static volatile uint8_t radar_data_available = 0;             // 有新数据可读的标志
-static char radar_accumulated_data[RADAR_ACCUMULATED_SIZE];   // 累积500ms内的所有雷达数据
-static uint16_t radar_accumulated_len = 0;                    // 累积数据长度
-static uint32_t radar_last_print_time = 0;                    // 上次输出时间戳
+/* 外部变量声明 -------------------------------------------------------------*/
+extern UART_HandleTypeDef huart3;  /* USART3句柄 (在main.c中定义) */
 
-/* 雷达数据处理和MQTT发送 */
-static RadarState_t radar_presence_state = RADAR_STATE_NOBODY;  // 当前状态
-static RadarState_t radar_last_state = RADAR_STATE_NOBODY;      // 上一次的状态
-static uint32_t radar_state_change_time = 0;                    // 状态切换时间点
-static uint8_t radar_has_valid_data = 0;                        // 500ms内是否有有效数据
-static uint8_t radar_has_no_alarm = 0;                          // 500ms内是否有no alarm
-static uint16_t radar_sum_r = 0;                                // R值总和
-static uint16_t radar_sum_p = 0;                                // P值总和
-static uint16_t radar_valid_count = 0;                          // 有效数据个数
-static uint32_t radar_last_mqtt_send = 0;                       // 上次MQTT发送时间戳
-static uint16_t radar_last_avg_r = 0;                           // 上次发送的平均R值（用于定时发送）
-static uint16_t radar_last_avg_p = 0;                           // 上次发送的平均P值（用于定时发送）
+/* Private function prototypes -----------------------------------------------*/
+static void Radar_Process_Data(uint8_t *data, uint16_t len);
+static void Radar_Parse_Frame(uint8_t *data, uint16_t len);
+static int8_t Radar_Parse_TargetInfo(const char *str, Radar_TargetInfo_t *info);
 
-/* ==================== 私有函数声明 ==================== */
-static void RADAR_ParseAndSendData(void);
-static void RADAR_SendMQTT(uint16_t avg_r, uint16_t avg_p, RadarState_t state, uint8_t include_temp_humi);
-
-/* ==================== 函数实现 ==================== */
+/* Exported functions --------------------------------------------------------*/
 
 /**
-  * @brief 初始化雷达模块
-  */
+ * @brief  初始化雷达模块 (DMA + 空闲中断)
+ * @retval 0: 成功, -1: 失败
+ * @details
+ *          1. 清零雷达控制结构体
+ *          2. 启动 DMA 接收（循环模式 + 空闲中断）
+ */
 int8_t RADAR_Init(void)
 {
-    // 清零所有缓冲区和变量
-    memset(radar_rx_buffer, 0, sizeof(radar_rx_buffer));
-    memset(radar_processed_buffer, 0, sizeof(radar_processed_buffer));
-    memset(radar_accumulated_data, 0, sizeof(radar_accumulated_data));
-    radar_rx_index = 0;
-    radar_rx_ready = 0;
-    radar_data_available = 0;
-    radar_accumulated_len = 0;
-    radar_last_print_time = HAL_GetTick();
-
-    // 初始化状态变量
-    radar_presence_state = RADAR_STATE_NOBODY;
-    radar_last_state = RADAR_STATE_NOBODY;
-    radar_state_change_time = 0;
-    radar_has_valid_data = 0;
-    radar_has_no_alarm = 0;
-    radar_sum_r = 0;
-    radar_sum_p = 0;
-    radar_valid_count = 0;
-    radar_last_mqtt_send = 0;
-    radar_last_avg_r = 0;
-    radar_last_avg_p = 0;
-
-    // 启动UART接收中断
-    if(HAL_UART_Receive_IT(&huart3, &radar_rx_byte, 1) != HAL_OK)
+    /* 清零雷达控制结构体 */
+    memset(&Radar, 0, sizeof(Radar_t));
+    Radar.state = RADAR_STATE_OK;
+    if (HAL_UARTEx_ReceiveToIdle_DMA(&huart3, Radar.rx_buffer, sizeof(Radar.rx_buffer)) != HAL_OK)
     {
+        Radar.state = RADAR_STATE_ERROR;
         return -1;
     }
 
@@ -89,386 +59,340 @@ int8_t RADAR_Init(void)
 }
 
 /**
-  * @brief 雷达数据处理函数 (在主循环中调用)
-  */
+ * @brief  雷达UART接收事件回调 (在中断中调用)
+ * @note   此函数由 HAL_UARTEx_RxEventCallback 调用
+ *         处理DMA接收完成或空闲中断事件
+ * @param  huart: UART句柄
+ * @param  Size: 当前DMA缓冲区中的数据量
+ * @details
+ *          - 检测是否是USART3
+ *          - 处理DMA循环缓冲区的卷绕情况
+ *          - 仅做数据搬运，不做解析（避免在中断中做浮点运算）
+ */
+void RADAR_UART_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
+{
+    if (huart->Instance != USART3)
+    {
+        return;  /* 不是USART3，直接返回 */
+    }
+
+    /* 更新最后接收时间戳 */
+    Radar.last_frame_time = HAL_GetTick();
+
+    /* 处理DMA循环缓冲区的数据 */
+    if (Size > Radar.old_pos)
+    {
+        /* 情况1: 数据是线性的（未发生卷绕）
+         * 数据范围: RxBuffer[old_pos] 到 RxBuffer[Size-1]
+         */
+        uint16_t len = Size - Radar.old_pos;
+        Radar_Process_Data(&Radar.rx_buffer[Radar.old_pos], len);
+    }
+    else if (Size < Radar.old_pos)
+    {
+        /* 情况2: 发生了卷绕（DMA循环回到缓冲区开头）
+         * 第一部分: old_pos 到 Buffer尾部
+         * 第二部分: 0 到 Size
+         */
+        uint16_t len1 = sizeof(Radar.rx_buffer) - Radar.old_pos;
+        Radar_Process_Data(&Radar.rx_buffer[Radar.old_pos], len1);
+
+        uint16_t len2 = Size;
+        Radar_Process_Data(&Radar.rx_buffer[0], len2);
+    }
+    /* 注意：Size == Radar.old_pos 的情况无需处理（无新数据） */
+
+    /* 更新位置，等待下一次中断 */
+    Radar.old_pos = Size;
+
+    /* 注意：在 Circular 模式下，不需要重新调用 HAL_UARTEx_ReceiveToIdle_DMA
+     * 它会自动循环接收
+     */
+}
+
+/**
+ * @brief  处理雷达数据帧 (在主循环中调用)
+ * @note   将接收到的雷达数据输出到调试串口
+ *         检测累积缓冲区超时，完成帧组装
+ *         解析雷达数据并维护目标状态
+ */
 void RADAR_Process(void)
 {
-    /* 处理雷达数据 - 使用双缓冲区安全读取 */
-    if(radar_data_available)
+    uint32_t current_time = HAL_GetTick();
+
+    /* 检查累积缓冲区是否有数据且超时 */
+    if (Radar.accum_len > 0 &&
+        (current_time - Radar.accum_last_rx_time) > RADAR_FRAME_TIMEOUT_MS)
     {
-        // 从处理缓冲区读取数据
-        char temp_line[256];
-        strncpy(temp_line, radar_processed_buffer, sizeof(temp_line) - 1);
-        temp_line[sizeof(temp_line) - 1] = '\0';
+        /* 超时，认为一帧完整了 */
+        uint16_t copy_len = (Radar.accum_len < sizeof(Radar.current_frame.data)) ?
+                            Radar.accum_len : sizeof(Radar.current_frame.data);
 
-        // 清除数据可用标志
-        radar_data_available = 0;
+        memcpy(Radar.current_frame.data, Radar.accum_buffer, copy_len);
+        Radar.current_frame.length = copy_len;
+        Radar.current_frame.timestamp = Radar.accum_last_rx_time;
+        Radar.frame_ready = 1;
 
-        // 收到一行数据,追加到累积缓冲区
-        uint16_t line_len = strlen(temp_line);
-        if(radar_accumulated_len + line_len + 2 < sizeof(radar_accumulated_data))
-        {
-            // 添加换行符分隔
-            if(radar_accumulated_len > 0)
-            {
-                radar_accumulated_data[radar_accumulated_len++] = '\r';
-                radar_accumulated_data[radar_accumulated_len++] = '\n';
-            }
-            // 追加新行
-            strcpy(&radar_accumulated_data[radar_accumulated_len], temp_line);
-            radar_accumulated_len += line_len;
-        }
-        else
-        {
-            // 缓冲区即将满,强制输出并清空
-            radar_accumulated_data[radar_accumulated_len] = '\0';
-            char radar_msg[1100];
-            snprintf(radar_msg, sizeof(radar_msg), "[RADAR]\r\n%s\r\n", radar_accumulated_data);
-            DEBUG_SendString(radar_msg);
-
-            // 清空累积缓冲区
-            radar_accumulated_len = 0;
-
-            // 追加当前行
-            strcpy(&radar_accumulated_data[radar_accumulated_len], temp_line);
-            radar_accumulated_len += line_len;
-
-            // 更新输出时间戳
-            radar_last_print_time = HAL_GetTick();
-        }
+        /* 清空累积缓冲区 */
+        Radar.accum_len = 0;
     }
 
-    /* 定时处理雷达数据 - 每500ms解析并统计一次 */
-    if(HAL_GetTick() - radar_last_print_time > 500)
+    /* 检查是否有完整帧数据 */
+    if (!Radar.frame_ready)
     {
-        // 添加字符串结束符
-        radar_accumulated_data[radar_accumulated_len] = '\0';
-
-        // 然后解析和发送MQTT（RADAR_RAW输出移到解析函数内部）
-        RADAR_ParseAndSendData();
+        return;  /* 无新数据，直接返回 */
     }
+
+    /* 解析帧数据，更新目标状态 */
+    Radar_Parse_Frame(Radar.current_frame.data, Radar.current_frame.length);
+    /* 清除帧就绪标志 */
+    Radar.frame_ready = 0;
 }
 
 /**
-  * @brief 解析并发送雷达数据
-  */
-static void RADAR_ParseAndSendData(void)
+ * @brief  发送AT命令到雷达 (预留接口)
+ * @param  cmd: AT命令字符串
+ * @retval 0: 成功, -1: 失败
+ */
+int8_t RADAR_SendCommand(const char* cmd)
 {
-    // 重置统计变量
-    radar_has_valid_data = 0;
-    radar_has_no_alarm = 0;
-    radar_sum_r = 0;
-    radar_sum_p = 0;
-    radar_valid_count = 0;
-
-    // 添加字符串结束符
-    radar_accumulated_data[radar_accumulated_len] = '\0';
-
-    // 解析累积数据,查找有效数据
-    char *line = strtok(radar_accumulated_data, "\r\n");
-    while(line != NULL)
-    {
-        // 检查是否包含"R:"(有效数据)
-        if(strstr(line, "R:") != NULL && strstr(line, "P:") != NULL)
-        {
-            // 解析格式: "X,R:XXcm,P:XX"
-            char *r_pos = strstr(line, "R:");
-            char *p_pos = strstr(line, "P:");
-
-            if(r_pos != NULL && p_pos != NULL)
-            {
-                uint16_t r_val = 0, p_val = 0;
-                // R:XXcm格式,忽略cm单位
-                sscanf(r_pos, "R:%hd", &r_val);
-                // P:XX格式
-                sscanf(p_pos, "P:%hd", &p_val);
-
-                // 数据合理性检查
-                if(r_val < 1000 && p_val < 100)
-                {
-                    radar_sum_r += r_val;
-                    radar_sum_p += p_val;
-                    radar_valid_count++;
-                    radar_has_valid_data = 1;
-                }
-            }
-        }
-        // 检查是否是"no alarm"
-        else if(strstr(line, "no alarm") != NULL)
-        {
-            radar_has_no_alarm = 1;
-        }
-
-        line = strtok(NULL, "\r\n");
-    }
-
-    // 只在有有效数据或no alarm时输出原始雷达数据（过滤掉单纯的have alarm）
-    if(radar_has_valid_data || radar_has_no_alarm)
-    {
-        if(radar_accumulated_len > 0)
-        {
-            char raw_data_msg[1200];
-            snprintf(raw_data_msg, sizeof(raw_data_msg), "[RADAR_RAW] %s\r\n", radar_accumulated_data);
-            DEBUG_SendString(raw_data_msg);
-        }
-    }
-    else
-    {
-        // 只输出have alarm的调试信息（简化版）
-        if(radar_accumulated_len > 0)
-        {
-            DEBUG_SendString("[RADAR] have alarm (no distance data)\r\n");
-        }
-    }
-
-    // 清空累积缓冲区
-    radar_accumulated_len = 0;
-    radar_accumulated_data[0] = '\0';
-
-    // 判定当前雷达状态
-    RadarState_t radar_state;
-    uint16_t avg_r = 0, avg_p = 0;
-
-    if(radar_has_no_alarm)
-    {
-        // 有no alarm → 无人
-        radar_state = RADAR_STATE_NOBODY;
-        avg_r = 0;
-        avg_p = 0;
-    }
-    else if(radar_has_valid_data)
-    {
-        // 有有效数据 → 有人
-        radar_state = RADAR_STATE_PRESENCE;
-        avg_r = radar_sum_r / radar_valid_count;
-        avg_p = radar_sum_p / radar_valid_count;
-        // 保存有效的平均值，供后续定时发送使用
-        radar_last_avg_r = avg_r;
-        radar_last_avg_p = avg_p;
-    }
-    else
-    {
-        // 全是have alarm → 有人，但没有新的有效距离/强度数据
-        radar_state = RADAR_STATE_PRESENCE;
-        // 不更新平均值，保持旧值不变
-        avg_r = (radar_last_avg_r > 0) ? radar_last_avg_r : 0;
-        avg_p = (radar_last_avg_p > 0) ? radar_last_avg_p : 0;
-    }
-
-    // 更新红外传感器数据（读取最新状态）
-    IR_SENSOR_Process();
-
-    // 读取红外传感器状态
-    IRSensorData_t ir_data;
-    IRSensorState_t ir_state = IR_STATE_NOBODY;
-    if(IR_SENSOR_GetData(&ir_data) == 0)
-    {
-        ir_state = ir_data.state;
-    }
-
-    // 融合判断：雷达或红外任一检测到有人，则最终状态为有人
-    RadarState_t final_state = (radar_state == RADAR_STATE_PRESENCE || ir_state == IR_STATE_PRESENCE)
-                                   ? RADAR_STATE_PRESENCE : RADAR_STATE_NOBODY;
-
-    // 检查状态是否切换
-    uint8_t state_changed = 0;
-    if(final_state != radar_last_state)
-    {
-        // 状态切换,立即更新状态
-        radar_presence_state = final_state;
-        state_changed = 1;
-
-        // 立即发送MQTT (状态改变时，包含温湿度数据)
-        RADAR_SendMQTT(avg_r, avg_p, final_state, 1);
-        radar_last_mqtt_send = HAL_GetTick();
-
-        // 更新状态和时间戳
-        radar_last_state = final_state;
-        radar_state_change_time = HAL_GetTick();
-    }
-
-    // 更新输出时间戳
-    radar_last_print_time = HAL_GetTick();
-
-    /* 雷达智能MQTT发送策略 */
-    static uint8_t rapid_send_count = 0;      // 快速发送计数器（0-10次）
-    const uint8_t MAX_RAPID_SEND = 10;         // 最大快速发送次数
-    const uint32_t RAPID_SEND_INTERVAL = 3000; // 快速发送间隔：3秒
-    const uint32_t NORMAL_SEND_INTERVAL = 15000; // 正常发送间隔：15秒
-
-    /* 状态改变时重置快速发送计数器 */
-    if(state_changed)
-    {
-        rapid_send_count = 0;  // 重置计数器，从0开始计数
-    }
-
-    // 快速发送模式：前10次，每3秒发送一次（不包含温湿度）
-    if(rapid_send_count < MAX_RAPID_SEND)
-    {
-        static uint32_t radar_rapid_last_send = 0;
-        if(HAL_GetTick() - radar_rapid_last_send >= RAPID_SEND_INTERVAL &&
-           HAL_GetTick() - radar_last_mqtt_send > 1000)
-        {
-            // 使用保存的有效平均值，如果状态为无人则为0
-            uint16_t r = (radar_presence_state == RADAR_STATE_PRESENCE) ?
-                         ((radar_last_avg_r > 0) ? radar_last_avg_r : 0) : 0;
-            uint16_t p = (radar_presence_state == RADAR_STATE_PRESENCE) ?
-                         ((radar_last_avg_p > 0) ? radar_last_avg_p : 0) : 0;
-
-            RADAR_SendMQTT(r, p, radar_presence_state, 0);  // 0=不包含温湿度
-            radar_rapid_last_send = HAL_GetTick();
-            radar_last_mqtt_send = HAL_GetTick();
-            rapid_send_count++;  // 增加计数器
-        }
-    }
-    // 正常发送模式：10次后，每15秒发送一次，交替发送纯雷达和雷达+温湿度
-    else
-    {
-        static uint32_t radar_normal_last_send = 0;
-        static uint8_t normal_send_toggle = 0;  // 交替标志：0=纯雷达，1=雷达+温湿度
-
-        if(HAL_GetTick() - radar_normal_last_send >= NORMAL_SEND_INTERVAL &&
-           HAL_GetTick() - radar_last_mqtt_send > 1000)
-        {
-            // 使用保存的有效平均值，如果状态为无人则为0
-            uint16_t r = (radar_presence_state == RADAR_STATE_PRESENCE) ?
-                         ((radar_last_avg_r > 0) ? radar_last_avg_r : 0) : 0;
-            uint16_t p = (radar_presence_state == RADAR_STATE_PRESENCE) ?
-                         ((radar_last_avg_p > 0) ? radar_last_avg_p : 0) : 0;
-
-            // 交替发送：第1次纯雷达，第2次雷达+温湿度，第3次纯雷达...
-            RADAR_SendMQTT(r, p, radar_presence_state, normal_send_toggle);
-            normal_send_toggle = !normal_send_toggle;  // 翻转标志
-
-            radar_normal_last_send = HAL_GetTick();
-            radar_last_mqtt_send = HAL_GetTick();
-        }
-    }
-}
-
-/**
-  * @brief 发送雷达MQTT数据
-  * @param avg_r: 平均距离
-  * @param avg_p: 平均强度
-  * @param state: 状态
-  * @param include_temp_humi: 是否包含温湿度数据（0=不包含，1=包含）
-  */
-static void RADAR_SendMQTT(uint16_t avg_r, uint16_t avg_p, RadarState_t state, uint8_t include_temp_humi)
-{
-    char mqtt_msg[150];
-
-    // 更新红外传感器数据（读取最新状态）
-    IR_SENSOR_Process();
-
-    // 读取红外传感器状态
-    IRSensorData_t ir_data;
-    uint8_t ir_state = 0;
-    if(IR_SENSOR_GetData(&ir_data) == 0)
-    {
-        ir_state = ir_data.state;
-    }
-
-    // 根据参数决定是否包含温湿度数据
-    if(include_temp_humi)
-    {
-        // 读取温湿度数据
-        float temp, humi;
-        uint8_t ret = SHT30_Soft_Read(&temp, &humi);
-
-        if(ret == 0)
-        {
-            int temp_int = (int)temp;
-            int temp_dec = (int)((temp - temp_int) * 100);
-            int humi_int = (int)humi;
-            int humi_dec = (int)((humi - humi_int) * 100);
-
-            // 格式: devXXXXXXXX_tempYYYY_humiZZZZ_radarRXXX_PYY_sN_irM
-            snprintf(mqtt_msg, sizeof(mqtt_msg),
-                     "dev%s_temp%d%02d_humi%d%02d_radarR%d_P%d_s%d_ir%d",
-                     g_device_code, temp_int, temp_dec, humi_int, humi_dec,
-                     avg_r, avg_p, state, ir_state);
-        }
-        else
-        {
-            // 温湿度读取失败，不包含温湿度数据
-            snprintf(mqtt_msg, sizeof(mqtt_msg),
-                     "dev%s_radarR%d_P%d_s%d_ir%d", g_device_code, avg_r, avg_p, state, ir_state);
-        }
-    }
-    else
-    {
-        // 不包含温湿度数据
-        // 格式: devXXXXXXXX_radarRXXX_PYY_sN_irM (包含设备码和红外传感器状态)
-        snprintf(mqtt_msg, sizeof(mqtt_msg),
-                 "dev%s_radarR%d_P%d_s%d_ir%d", g_device_code, avg_r, avg_p, state, ir_state);
-    }
-
-    ESP_PublishMQTT(MQTT_PUBLISH_TOPIC, mqtt_msg);
-}
-
-/**
-  * @brief 获取雷达数据
-  */
-int8_t RADAR_GetData(RadarData_t *data)
-{
-    if(data == NULL)
+    if (cmd == NULL)
     {
         return -1;
     }
 
-    data->state = radar_presence_state;
-    data->distance = (radar_presence_state == RADAR_STATE_PRESENCE) ?
-                     ((radar_last_avg_r > 0) ? radar_last_avg_r : 1) : 0;
-    data->intensity = (radar_presence_state == RADAR_STATE_PRESENCE) ?
-                      ((radar_last_avg_p > 0) ? radar_last_avg_p : 1) : 0;
-    data->last_update_time = HAL_GetTick();
+    /* 发送命令到雷达 */
+    if (HAL_UART_Transmit(&huart3, (uint8_t*)cmd, strlen(cmd), 1000) != HAL_OK)
+    {
+        return -1;
+    }
+
+    /* 发送回车换行 */
+    const char* end = "\r\n";
+    if (HAL_UART_Transmit(&huart3, (uint8_t*)end, 2, 100) != HAL_OK)
+    {
+        return -1;
+    }
 
     return 0;
 }
 
 /**
-  * @brief UART接收完成回调函数
-  */
-void RADAR_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+ * @brief  获取雷达目标信息
+ * @param  info: 目标信息结构体指针
+ * @retval 0: 成功, -1: 失败
+ */
+int8_t RADAR_GetTargetInfo(Radar_TargetInfo_t *info)
 {
-    // 检查是否是USART3的中断（雷达数据）
-    if(huart->Instance == USART3)
+    if (info == NULL)
     {
-        // 检查是否收到换行符或回车符，表示一行雷达数据结束
-        if(radar_rx_byte == '\r' || radar_rx_byte == '\n')
-        {
-            if(radar_rx_index > 0)
-            {
-                // 添加字符串结束符
-                radar_rx_buffer[radar_rx_index] = '\0';
+        return -1;
+    }
 
-                // 只有在主循环已经处理完上一条数据时，才复制新数据
-                if(!radar_data_available)
-                {
-                    // 复制到处理缓冲区
-                    strcpy(radar_processed_buffer, (char*)radar_rx_buffer);
-                    radar_data_available = 1;
-                }
-            }
-            // 重置索引，准备下一次接收
-            radar_rx_index = 0;
-        }
-        else
+    /* 复制目标信息 */
+    memcpy(info, &Radar.target_info, sizeof(Radar_TargetInfo_t));
+    return 0;
+}
+
+/**
+ * @brief  获取雷达目标状态
+ * @retval Radar_TargetStatus_t: 当前目标状态
+ */
+Radar_TargetStatus_t RADAR_GetTargetStatus(void)
+{
+    return Radar.target_info.status;
+}
+
+/* Private functions ---------------------------------------------------------*/
+
+/**
+ * @brief  解析雷达数据帧
+ * @param  data: 数据指针
+ * @param  len: 数据长度
+ * @details 识别三种帧格式并更新目标状态
+ *          - "no alarm" -> 无人
+ *          - "have alarm" -> 有人
+ *          - "2,R:134cm,P:173" -> 有人且带详细信息
+ *          基于信号强度维护状态机：检测 -> 缓冲 -> 无人
+ */
+static void Radar_Parse_Frame(uint8_t *data, uint16_t len)
+{
+    if (data == NULL || len == 0)
+    {
+        return;
+    }
+
+    /* 添加字符串结束符以便使用字符串函数 */
+    char frame_str[256];
+    uint16_t copy_len = (len < sizeof(frame_str) - 1) ? len : sizeof(frame_str) - 1;
+    memcpy(frame_str, data, copy_len);
+    frame_str[copy_len] = '\0';
+
+    /* 检测 "no alarm" */
+    if (strstr(frame_str, "no alarm") != NULL)
+    {
+        Radar.target_info.status = RADAR_TARGET_NOBODY;
+        /* 无人时不更新range_cm和power，保持上次的值 */
+        /* 重置高信号帧计数器 */
+        Radar.target_info.high_power_frames = 0;
+        Radar.target_info.last_update_time = HAL_GetTick();
+    }
+    /* 检测 "have alarm" */
+    else if (strstr(frame_str, "have alarm") != NULL)
+    {
+        /* 如果同时包含详细信息，则解析并更新P值和R值 */
+        if (Radar_Parse_TargetInfo(frame_str, &Radar.target_info) == 0)
         {
-            // 不是换行符，存储到缓冲区
-            if(radar_rx_index < RADAR_RX_BUFFER_SIZE - 1)
+            /* 成功解析出详细信息，检查信号强度 */
+            if (Radar.target_info.power >= RADAR_POWER_THRESHOLD)
             {
-                radar_rx_buffer[radar_rx_index] = radar_rx_byte;
-                radar_rx_index++;
+                /* 信号强度高于阈值 */
+                if (Radar.target_info.status == RADAR_TARGET_NOBODY)
+                {
+                    /* 当前是无人状态，需要连续多帧高信号才能切换到有人 */
+                    Radar.target_info.high_power_frames++;
+                    if (Radar.target_info.high_power_frames >= RADAR_THRESHOLD_3)
+                    {
+                        /* 达到帧数3，切换到有人状态 */
+                        Radar.target_info.status = RADAR_TARGET_WITH_INFO;
+                        Radar.target_info.low_power_frames = 0;
+                    }
+                    else
+                    {
+                        /* 未达到帧数3，保持无人状态 */
+                        /* 仍然更新range_cm和power，以便查询最新的目标信息 */
+                    }
+                }
+                else
+                {
+                    /* 当前不是无人状态，重置低信号帧计数器，保持有人状态 */
+                    Radar.target_info.low_power_frames = 0;
+                    Radar.target_info.high_power_frames = 0;
+                    Radar.target_info.status = RADAR_TARGET_WITH_INFO;
+                }
             }
             else
             {
-                // 缓冲区满，重置索引
-                radar_rx_index = 0;
+                /* 信号强度低于阈值，重置高信号帧计数器，增加低信号帧计数器 */
+                Radar.target_info.high_power_frames = 0;
+                Radar.target_info.low_power_frames++;
+
+                /* 根据计数器值确定状态 */
+                if (Radar.target_info.low_power_frames >= RADAR_THRESHOLD_2)
+                {
+                    /* 达到上限帧数2，状态改为无人 */
+                    Radar.target_info.status = RADAR_TARGET_NOBODY;
+                }
+                else if (Radar.target_info.low_power_frames >= RADAR_THRESHOLD_1)
+                {
+                    /* 达到上限帧数1，状态改为缓冲 */
+                    Radar.target_info.status = RADAR_TARGET_BUFFERING;
+                }
+                else
+                {
+                    /* 未达到阈值，保持WITH_INFO状态 */
+                    Radar.target_info.status = RADAR_TARGET_WITH_INFO;
+                }
             }
         }
+        else
+        {
+            Radar.target_info.status = RADAR_TARGET_BUFFERING;
+            /* 增加计数器 */
+            Radar.target_info.low_power_frames++;
+            /* 有人但无详细信息时，不更新range_cm和power，保持上次的值 */
+            if (Radar.target_info.low_power_frames >= RADAR_THRESHOLD_2)
+            {
+                Radar.target_info.status = RADAR_TARGET_NOBODY;
+            }
+        }
+        Radar.target_info.last_update_time = HAL_GetTick();
+    }
+}
 
-        // 继续接收下一个字节
-        HAL_UART_Receive_IT(&huart3, &radar_rx_byte, 1);
+/**
+ * @brief  解析目标详细信息
+ * @param  str: 帧字符串
+ * @param  info: 目标信息结构体指针
+ * @retval 0: 成功, -1: 失败
+ * @details 解析格式: "2,R:134cm,P:173" (忽略目标数量)
+ */
+static int8_t Radar_Parse_TargetInfo(const char *str, Radar_TargetInfo_t *info)
+{
+    if (str == NULL || info == NULL)
+    {
+        return -1;
+    }
+
+    /* 查找距离 (格式: "R:134cm,") */
+    const char *r_marker = strstr(str, "R:");
+    if (r_marker == NULL)
+    {
+        return -1;
+    }
+
+    /* 提取距离值 */
+    uint16_t range = 0;
+    const char *r_start = r_marker + 2;  // 跳过 "R:"
+    while (*r_start >= '0' && *r_start <= '9')
+    {
+        range = range * 10 + (*r_start - '0');
+        r_start++;
+    }
+    info->range_cm = range;
+
+    /* 查找功率 (格式: "P:173") */
+    const char *p_marker = strstr(r_start, "P:");
+    if (p_marker == NULL)
+    {
+        return -1;
+    }
+
+    /* 提取功率值 */
+    uint16_t power = 0;
+    const char *p_start = p_marker + 2;  // 跳过 "P:"
+    while (*p_start >= '0' && *p_start <= '9')
+    {
+        power = power * 10 + (*p_start - '0');
+        p_start++;
+    }
+    info->power = power;
+
+    return 0;  /* 成功 */
+}
+
+/**
+ * @brief  处理雷达数据 (在中断中调用)
+ * @note   此函数在中断上下文中执行，必须快速返回
+ *         将数据累积到 accum_buffer
+ * @param  data: 数据指针
+ * @param  len: 数据长度
+ * @details
+ *          - 将数据追加到累积缓冲区
+ *          - 更新最后接收时间
+ *          - 不设置 frame_ready，由主循环通过超时判断帧结束
+ */
+static void Radar_Process_Data(uint8_t *data, uint16_t len)
+{
+    if (data == NULL || len == 0)
+    {
+        return;  /* 无效参数 */
+    }
+
+    /* 计算可拷贝的长度（防止累积缓冲区溢出） */
+    uint16_t available_space = sizeof(Radar.accum_buffer) - Radar.accum_len;
+    uint16_t copy_len = (len < available_space) ? len : available_space;
+
+    if (copy_len > 0)
+    {
+        /* 追加数据到累积缓冲区 */
+        memcpy(&Radar.accum_buffer[Radar.accum_len], data, copy_len);
+        Radar.accum_len += copy_len;
+        Radar.accum_last_rx_time = HAL_GetTick();
+    }
+    else
+    {
+        /* 累积缓冲区已满，强制完成上一帧 */
+        Radar.accum_len = 0;  /* 清空，丢弃数据 */
     }
 }

@@ -70,6 +70,9 @@ void HAL_MspInit(void)
   __HAL_RCC_AFIO_CLK_ENABLE();
   __HAL_RCC_PWR_CLK_ENABLE();
 
+  /* DMA时钟使能 - 使用RCC_AHBENR寄存器 */
+  RCC->AHBENR |= RCC_AHBENR_DMA1EN;  // 使能DMA1时钟
+
   /* System interrupt init*/
 
   /** NOJTAG: JTAG-DP Disabled and SW-DP Enabled
@@ -82,6 +85,10 @@ void HAL_MspInit(void)
 }
 
 /* USER CODE BEGIN 1 */
+
+/* 外部变量声明 */
+extern UART_HandleTypeDef huart3;  // USART3句柄
+extern DMA_HandleTypeDef hdma_usart3_rx;  // USART3 RX DMA句柄
 
 /**
   * @brief ADC MSP Initialization
@@ -246,6 +253,35 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart)
     /* USART3中断配置 */
     HAL_NVIC_SetPriority(USART3_IRQn, 0, 1);         // 设置中断优先级
     HAL_NVIC_EnableIRQ(USART3_IRQn);                // 使能USART3中断
+
+    /* USER CODE BEGIN USART3_MspInit 0 */
+
+    /* USART3 DMA配置 */
+    /* USART3_RX 使用 DMA1 Channel 3 */
+    hdma_usart3_rx.Instance = DMA1_Channel3;
+    hdma_usart3_rx.Init.Direction = DMA_PERIPH_TO_MEMORY;  // 外设到内存
+    hdma_usart3_rx.Init.PeriphInc = DMA_PINC_DISABLE;      // 外设地址不递增
+    hdma_usart3_rx.Init.MemInc = DMA_MINC_ENABLE;          // 内存地址递增
+    hdma_usart3_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;  // 外设字节对齐
+    hdma_usart3_rx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;     // 内存字节对齐
+    hdma_usart3_rx.Init.Mode = DMA_CIRCULAR;               // 循环模式
+    hdma_usart3_rx.Init.Priority = DMA_PRIORITY_LOW;       // 优先级低
+
+    /* 关联DMA到USART3 */
+    __HAL_LINKDMA(&huart3, hdmarx, hdma_usart3_rx);
+
+    /* 初始化DMA */
+    if (HAL_DMA_Init(&hdma_usart3_rx) != HAL_OK)
+    {
+      Error_Handler();
+    }
+
+    /* DMA中断配置 */
+    /* DMA1 Channel3 中断优先级 */
+    HAL_NVIC_SetPriority(DMA1_Channel3_IRQn, 0, 0);
+    HAL_NVIC_EnableIRQ(DMA1_Channel3_IRQn);
+
+    /* USER CODE END USART3_MspInit 0 */
 
     /* USER CODE BEGIN USART3_MspInit 1 */
 

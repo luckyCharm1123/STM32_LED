@@ -63,6 +63,7 @@
 UART_HandleTypeDef huart1;  // USART1句柄，用于调试输出（PA9/PA10，115200）
 UART_HandleTypeDef huart2;  // USART2句柄，用于管理串口2的所有操作
 UART_HandleTypeDef huart3;  // USART3句柄，用于毫米波雷达通信（PB10/PB11，115200）
+DMA_HandleTypeDef hdma_usart3_rx;  // USART3接收DMA句柄
 
 /* USER CODE BEGIN PV */
 /* 用户代码开始：私有变量 */
@@ -105,6 +106,7 @@ static void MX_USART3_UART_Init(void); // USART3初始化函数声明（雷达�
 void DEBUG_SendString(const char *str);    // USART1调试串口发送函数原型
 void Get_STM32_UID(char *uid_str);         // 获取STM32芯片唯一ID
 void Generate_Device_Code(char *device_code);  // 生成8位设备码
+uint8_t Process_Sensor_Status(uint8_t *last_combined_state);  // 处理传感器状态并返回综合状态
 /**
   * @brief USART1发送调试信息
   * @param str: 要发送的调试字符串，以'\0'结尾
@@ -169,7 +171,7 @@ int main(void)
   if(ESP_SubscribeMQTT(MQTT_SUBSCRIBE_TOPIC) == ESP_OK)
   {
     char sub_msg[128];
-    snprintf(sub_msg, sizeof(sub_msg), "[OK] Subscribed to topic: %s\r\n", MQTT_SUBSCRIBE_TOPIC);
+    snprintf(sub_msg, sizeof(sub_msg), "[OK] Subscribed to topic: %s\r\n\r\n", MQTT_SUBSCRIBE_TOPIC);
     DEBUG_SendString(sub_msg);
   }
   else
@@ -177,13 +179,31 @@ int main(void)
     DEBUG_SendString("[WARN] MQTT subscription failed\r\n");
   }
   MQTT_Manager_Init();  
-  DEBUG_SendString("[MQTT] Initialization Successful\r\n\r\n");
+  DEBUG_SendString("[MQTT] Initialization Successful\r\n");
   DEBUG_SendString("[SYSTEM] Initialization Successful\r\n\r\n");
 
 
+  /* 传感器状态输出计时变量 */
+  static uint32_t last_sensor_output_time = 0;
+  const uint32_t sensor_output_interval = 500;  // 500ms输出一次
+
+  /* 综合状态变量 */
+  static uint8_t last_combined_has_person = 0;  // 上次综合状态（0=无人，1=有人）
+
   while (1)
   {
-    
+    /* 处理雷达数据 */
+    RADAR_Process();
+
+    /* 处理红外传感器数据 */
+    IR_SENSOR_Process();
+
+    /* 每500ms处理并输出一次传感器状态 */
+    if(HAL_GetTick() - last_sensor_output_time >= sensor_output_interval)
+    {
+      Process_Sensor_Status(&last_combined_has_person);
+      last_sensor_output_time = HAL_GetTick();
+    }
 
     /* 短暂延时，避免CPU空转 */
     HAL_Delay(10);
@@ -446,6 +466,132 @@ void Get_STM32_UID(char *uid_str)
 }
 
 /**
+  * @brief 处理传感器状态并输出
+  * @param last_combined_state: 上次综合状态的指针（用于检测状态切换）
+  * @retval 当前综合状态（0=无人，1=有人）
+  * @details 处理雷达和红外传感器状态，输出调试信息，
+  *          检测状态切换并激活MQTT快速发送模式
+  */
+uint8_t Process_Sensor_Status(uint8_t *last_combined_state)
+{
+  /* 红外传感器状态维护变量 */
+  static IRSensorState_t ir_stable_state = IR_STATE_NOBODY;
+  static uint8_t ir_high_count = 0;
+  static uint8_t ir_low_count = 0;
+  const uint8_t IR_THRESHOLD = 5;
+
+  /* 获取并输出雷达目标状态 */
+  Radar_TargetStatus_t target_status = RADAR_GetTargetStatus();
+  char radar_msg[128];
+
+  const char* status_str;
+  switch(target_status)
+  {
+    case RADAR_TARGET_NOBODY:
+      status_str = "NOBODY";
+      break;
+    case RADAR_TARGET_DETECTED:
+      status_str = "DETECTED";
+      break;
+    case RADAR_TARGET_WITH_INFO:
+      status_str = "WITH_INFO";
+      break;
+    case RADAR_TARGET_BUFFERING:
+      status_str = "BUFFERING";
+      break;
+    default:
+      status_str = "UNKNOWN";
+      break;
+  }
+
+  snprintf(radar_msg, sizeof(radar_msg), "[RADAR] Target Status: %s\r\n", status_str);
+  DEBUG_SendString(radar_msg);
+
+  /* 获取并处理红外传感器状态 */
+  IRSensorData_t ir_data;
+  if(IR_SENSOR_GetData(&ir_data) == 0)
+  {
+    /* 状态机维护逻辑 */
+    if(ir_data.pin_level == 1)
+    {
+      /* 当前读到高电平（有人） */
+      ir_high_count++;
+      ir_low_count = 0;
+
+      /* 连续5次高电平，切换到有人状态 */
+      if(ir_high_count >= IR_THRESHOLD)
+      {
+        ir_stable_state = IR_STATE_PRESENCE;
+      }
+    }
+    else
+    {
+      /* 当前读到低电平（无人） */
+      ir_low_count++;
+      ir_high_count = 0;
+
+      /* 连续5次低电平，切换到无人状态 */
+      if(ir_low_count >= IR_THRESHOLD)
+      {
+        ir_stable_state = IR_STATE_NOBODY;
+      }
+    }
+
+    /* 输出稳定状态和当前引脚电平 */
+    char ir_msg[128];
+    const char* ir_state_str = (ir_stable_state == IR_STATE_PRESENCE) ? "PRESENCE" : "NOBODY";
+    snprintf(ir_msg, sizeof(ir_msg), "[IR] State: %s, Pin: %d\r\n",
+             ir_state_str, ir_data.pin_level);
+    DEBUG_SendString(ir_msg);
+  }
+
+  /* 综合判断：两个传感器只要有一个显示有人，综合状态就为有人 */
+  uint8_t radar_has_person = 0;
+  uint8_t ir_has_person = 0;
+
+  /* 判断雷达状态：DETECTED、WITH_INFO、BUFFERING 都算有人 */
+  if(target_status == RADAR_TARGET_DETECTED ||
+     target_status == RADAR_TARGET_WITH_INFO ||
+     target_status == RADAR_TARGET_BUFFERING)
+  {
+    radar_has_person = 1;
+  }
+
+  /* 判断红外状态：PRESENCE 算有人 */
+  if(ir_stable_state == IR_STATE_PRESENCE)
+  {
+    ir_has_person = 1;
+  }
+
+  /* 综合状态：只要有一个传感器检测到有人，综合状态就是有人 */
+  uint8_t combined_has_person = (radar_has_person || ir_has_person) ? 1 : 0;
+  const char* combined_state_str = combined_has_person ? "PRESENCE" : "NOBODY";
+  char combined_msg[128];
+  snprintf(combined_msg, sizeof(combined_msg), "[COMBINED] State: %s\r\n", combined_state_str);
+  DEBUG_SendString(combined_msg);
+
+  /* 检测综合状态从无人切换到有人 */
+  if(combined_has_person == 1 && *last_combined_state == 0)
+  {
+    /* 状态从无人切换到有人，激活MQTT快速发送模式 */
+    MQTT_Manager_SetMode(MQTT_SEND_MODE_RAPID);
+
+    /* 如果当前已经是快速发送模式，清空快速发送次数计数器 */
+    if(MQTT_Manager_GetMode() == MQTT_SEND_MODE_RAPID)
+    {
+      MQTT_Manager_ResetRapidCounter();
+    }
+
+    DEBUG_SendString("[MQTT] Activated rapid send mode\r\n");
+  }
+
+  /* 更新上次的综合状态 */
+  *last_combined_state = combined_has_person;
+
+  return combined_has_person;
+}
+
+/**
   * @brief 生成8位设备码
   * @param device_code: 存储8位设备码的缓冲区（至少9字节，包含结束符）
   * @retval None
@@ -522,16 +668,28 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
           // 注意：索引将在主循环中被重置
         }
       }
-      
+
       // 继续接收下一个字节（ESP模式）
       HAL_UART_Receive_IT(&huart2, &rx_buffer[0], 1);
-
   }
+  // 注意：USART3使用HAL_UARTEx_RxEventCallback，不在这里处理
+}
+
+/**
+  * @brief UART接收事件回调函数 (用于雷达DMA+空闲中断)
+  * @param huart: UART句柄
+  * @param Size: 当前DMA缓冲区中的数据量
+  * @retval None
+  * @details 当DMA接收完成或检测到空闲帧时调用此函数
+  *          用于USART3的雷达数据接收
+  */
+void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
+{
   // 检查是否是USART3的中断（雷达数据）
-  else if(huart->Instance == USART3)
+  if(huart->Instance == USART3)
   {
-      // 调用雷达驱动的UART回调函数
-      RADAR_UART_RxCpltCallback(huart);
+      // 调用雷达驱动的UART事件回调函数
+      RADAR_UART_RxEventCallback(huart, Size);
   }
 }
 

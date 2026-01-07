@@ -28,6 +28,7 @@
 #include "main.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>  // 用于va_list, va_start, va_end
 
 /* 外部变量声明 */
 extern UART_HandleTypeDef huart1;  // USART1句柄（调试用）
@@ -74,8 +75,13 @@ void ESP01S_Start(const char *wifi_ssid, const char *wifi_password,
 void UsartPrintf(USART_TypeDef *USARTx, char *fmt,...)
 {
 	// 使用HAL库的调试输出
-	// 注意：这里简化实现，实际使用时可用va_list实现完整格式化
-	DEBUG_SendString(fmt);
+	// 使用va_list正确处理可变参数
+	char buffer[256];
+	va_list args;
+	va_start(args, fmt);
+	vsnprintf(buffer, sizeof(buffer), fmt, args);
+	va_end(args);
+	DEBUG_SendString(buffer);
 }
 
 /* Private functions ---------------------------------------------------------*/
