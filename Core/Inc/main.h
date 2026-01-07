@@ -41,7 +41,7 @@ extern "C" {
 
 /* Exported constants --------------------------------------------------------*/
 /* USER CODE BEGIN EC */
-#define MQTT_SUBSCRIBE_TOPIC  "testtopic2"  // 订阅的主题
+#define MQTT_SUBSCRIBE_TOPIC  "settingTopic"  // 订阅的主题
 #define MQTT_PUBLISH_TOPIC   "diantiTopic"  // 发布的主题
 /* USER CODE END EC */
 

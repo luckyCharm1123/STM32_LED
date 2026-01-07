@@ -646,10 +646,6 @@ uint8_t ESP_Process(void)
 uint8_t ESP_SubscribeMQTT(const char *topic)
 {
 	char cmd[128];
-
-	// 等待MQTT连接稳定
-	HAL_Delay(2000);
-
 	// 构建订阅指令
 	snprintf(cmd, sizeof(cmd), "AT+MQTTSUB=0,\"%s\",1\r\n", topic);
 
@@ -659,7 +655,7 @@ uint8_t ESP_SubscribeMQTT(const char *topic)
 		return ESP_OK;
 	}
 
-	USART2_SendString("[ERR] MQTT subscription failed\r\n");
+	UsartPrintf(USART1,"[ERR] MQTT subscription failed\r\n");
 	return ESP_ERROR;
 }
 

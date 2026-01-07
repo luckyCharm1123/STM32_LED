@@ -325,17 +325,16 @@ int main(void)
   DEBUG_SendString("=== WiFi and MQTT Initialized ===\r\n");
   
   /* 订阅MQTT主题 - 接收服务器下发的消息 */
-  USART2_SendString("\r\n=== MQTT Subscription ===\r\n");
+  DEBUG_SendString("\r\n=== MQTT Subscription ===\r\n");
   if(ESP_SubscribeMQTT(MQTT_SUBSCRIBE_TOPIC) == ESP_OK)
   {
     char sub_msg[128];
     snprintf(sub_msg, sizeof(sub_msg), "[OK] Subscribed to topic: %s\r\n", MQTT_SUBSCRIBE_TOPIC);
-    USART2_SendString(sub_msg);
     DEBUG_SendString(sub_msg);
   }
   else
   {
-    USART2_SendString("[WARN] MQTT subscription failed, will retry...\r\n");
+    DEBUG_SendString("[WARN] MQTT subscription failed, will retry...\r\n");
   }
 
   /* 温湿度数据已合并到雷达消息中，不再单独发送初始数据 */
