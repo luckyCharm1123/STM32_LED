@@ -38,6 +38,14 @@ typedef enum {
     MQTT_SEND_MODE_NORMAL = 1    ///< 正常发送模式（15秒间隔）
 } MQTT_SendMode_t;
 
+/**
+  * @brief MQTT发送类型枚举
+  */
+typedef enum {
+    MQTT_SEND_TYPE_RAPID = 0,    ///< 快速发送（状态变化时）
+    MQTT_SEND_TYPE_NORMAL = 1    ///< 普通发送（定时上报）
+} MQTT_SendType_t;
+
 /* ==================== 传感器数据结构 ==================== */
 
 /**
@@ -46,9 +54,11 @@ typedef enum {
 typedef struct {
     float temperature;       ///< 温度值（℃）
     float humidity;          ///< 湿度值（%）
-    uint8_t human_presence;  ///< 人体存在状态（0=无人，1=有人）
+    uint8_t human_presence;  ///< 雷达信号强度 P (用于MQTT消息)
     uint8_t motion_detected; ///< 运动检测状态（0=无运动，1=有运动）
-    uint8_t ir_status;       ///< 红外传感器状态（0=正常，1=遮挡）
+    uint8_t ir_status;       ///< 红外传感器状态 ir（0=无人，1=有人）
+    uint16_t radar_raw;      ///< 雷达距离 R（厘米，用于MQTT消息）
+    uint8_t static_value;    ///< 综合状态 s（0=无人，1=有人，雷达或红外任一检测到即为有人）
 } MQTT_SensorData_t;
 
 /* ==================== 函数声明 ==================== */
@@ -118,12 +128,26 @@ void MQTT_Manager_ResetRapidCounter(void);
 uint8_t MQTT_Manager_ShouldSend(uint32_t last_send_time);
 
 /**
-  * @brief 发送传感器数据到MQTT服务器
+  * @brief 发送传感器数据到MQTT服务器（普通发送）
   * @param sensor_data: 传感器数据指针
   * @retval ESP_OK: 发送成功, ESP_ERROR: 发送失败
-  * @details 构造MQTT消息并发送到服务器
+  * @details 定时上报，不影响快速发送计数器
+  *          消息格式: dev{设备ID}_temp1946_humi2918_radarR390_P14_s1_ir1
+  *          R=距离, P=信号强度, s=综合状态, ir=红外状态
+  *          设备ID由g_device_code全局变量提供
   */
-uint8_t MQTT_Manager_SendSensorData(const MQTT_SensorData_t *sensor_data);
+uint8_t MQTT_Manager_SendSensorDataNormal(const MQTT_SensorData_t *sensor_data);
+
+/**
+  * @brief 发送传感器数据到MQTT服务器（快速发送）
+  * @param sensor_data: 传感器数据指针
+  * @retval ESP_OK: 发送成功, ESP_ERROR: 发送失败
+  * @details 状态变化时触发，会增加快速发送计数器
+  *          消息格式: dev{设备ID}_radarR434_P15_s1_ir1
+  *          R=距离, P=信号强度, s=综合状态, ir=红外状态
+  *          设备ID由g_device_code全局变量提供
+  */
+uint8_t MQTT_Manager_SendSensorDataRapid(const MQTT_SensorData_t *sensor_data);
 
 /**
   * @brief 发送失败计数

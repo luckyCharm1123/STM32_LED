@@ -47,7 +47,7 @@
 #define ESP_RX_BUFFER_SIZE 512  // ESP接收缓冲区大小（与esp.c中一致）
 
 /* WiFi配置 - 请修改为您的WiFi信息 */
-#define WIFI_SSID     "1901"      // WiFi名称
+#define WIFI_SSID     "19099"      // WiFi名称
 #define WIFI_PASSWORD "qjdq1901"  // WiFi密码
 
 /* MQTT配置 */
@@ -190,8 +190,53 @@ int main(void)
   /* 综合状态变量 */
   static uint8_t last_combined_has_person = 0;  // 上次综合状态（0=无人，1=有人）
 
+  /* MQTT发送计时变量 */
+  static uint32_t last_send_time = 0;  // 上次发送时间
+
+  /* MQTT重连变量 */
+  static uint8_t need_reconnect = 0;   // 需要重连标志
+
   while (1)
   {
+    /* 检查是否需要重连（失败次数超过阈值） */
+    if(MQTT_Manager_ShouldReconnect() && !need_reconnect)
+    {
+      need_reconnect = 1;
+      DEBUG_SendString("\r\n[MQTT] Connection lost! Reconnecting...\r\n");
+    }
+
+    /* 执行重连操作 */
+    if(need_reconnect)
+    {
+      DEBUG_SendString("=== Reconnecting ESP and MQTT ===\r\n");
+
+      /* 重新初始化ESP模块并连接WiFi和MQTT */
+      ESP01S_Init(current_wifi_ssid, current_wifi_password,
+                     g_device_code, MQTT_USERNAME, MQTT_PASSWORD,
+                     MQTT_SERVER, MQTT_PORT);
+      DEBUG_SendString("=== WiFi and MQTT Reconnected ===\r\n");
+
+      /* 重新订阅MQTT主题 */
+      DEBUG_SendString("\r\n=== MQTT Subscription ===\r\n");
+      if(ESP_SubscribeMQTT(MQTT_SUBSCRIBE_TOPIC) == ESP_OK)
+      {
+        char sub_msg[128];
+        snprintf(sub_msg, sizeof(sub_msg), "[OK] Subscribed to topic: %s\r\n\r\n", MQTT_SUBSCRIBE_TOPIC);
+        DEBUG_SendString(sub_msg);
+      }
+      else
+      {
+        DEBUG_SendString("[WARN] MQTT subscription failed\r\n");
+      }
+
+      /* 重置MQTT管理器 */
+      MQTT_Manager_Init();
+      DEBUG_SendString("[MQTT] Manager Reset Successful\r\n");
+      DEBUG_SendString("[SYSTEM] Reconnection Successful\r\n\r\n");
+
+      /* 清除重连标志 */
+      need_reconnect = 0;
+    }
     /* 处理雷达数据 */
     RADAR_Process();
 
@@ -203,6 +248,93 @@ int main(void)
     {
       Process_Sensor_Status(&last_combined_has_person);
       last_sensor_output_time = HAL_GetTick();
+    }
+
+    /* 处理MQTT消息发送 */
+    if(MQTT_Manager_ShouldSend(last_send_time))
+    {
+      /* 准备传感器数据 */
+      MQTT_SensorData_t sensor_data;
+
+      /* 获取雷达数据 */
+      Radar_TargetInfo_t radar_info;
+      uint8_t radar_has_person = 0;  /* 雷达是否检测到有人 */
+      if(RADAR_GetTargetInfo(&radar_info) == 0)
+      {
+        sensor_data.motion_detected = (radar_info.status == RADAR_TARGET_WITH_INFO) ? 1 : 0;
+
+        /* 判断雷达状态：DETECTED、WITH_INFO、BUFFERING 都算有人 */
+        if(radar_info.status == RADAR_TARGET_DETECTED ||
+           radar_info.status == RADAR_TARGET_WITH_INFO ||
+           radar_info.status == RADAR_TARGET_BUFFERING)
+        {
+          radar_has_person = 1;
+          /* 有人时，设置距离和信号强度 */
+          sensor_data.radar_raw = radar_info.range_cm;      /* R: 距离 */
+          sensor_data.human_presence = radar_info.power;     /* P: 信号强度 */
+        }
+        else
+        {
+          /* 无人时，距离和信号强度都为0 */
+          sensor_data.radar_raw = 0;
+          sensor_data.human_presence = 0;
+        }
+      }
+      else
+      {
+        sensor_data.radar_raw = 0;
+        sensor_data.human_presence = 0;
+        sensor_data.motion_detected = 0;
+      }
+
+      /* 获取红外传感器数据 */
+      IRSensorData_t ir_data;
+      if(IR_SENSOR_GetData(&ir_data) == 0)
+      {
+        sensor_data.ir_status = (ir_data.state == IR_STATE_PRESENCE) ? 1 : 0;
+      }
+      else
+      {
+        sensor_data.ir_status = 0;
+      }
+
+      /* 综合状态：雷达或红外任一检测到有人即为有人 (与Process_Sensor_Status中的逻辑一致) */
+      sensor_data.static_value = (radar_has_person || sensor_data.ir_status) ? 1 : 0;  /* s: 综合状态 */
+
+      /* 根据当前模式选择发送方式 */
+      if(MQTT_Manager_GetMode() == MQTT_SEND_MODE_RAPID)
+      {
+        /* ========== 快速发送模式：不采集温湿度数据 ========== */
+        sensor_data.temperature = 0.0f;
+        sensor_data.humidity = 0.0f;
+
+        /* 快速发送 */
+        MQTT_Manager_SendSensorDataRapid(&sensor_data);
+      }
+      else
+      {
+        /* ========== 普通发送模式：采集所有传感器数据 ========== */
+
+        /* 获取温湿度数据 */
+        float temperature, humidity;
+        if(SHT30_Soft_Read(&temperature, &humidity) == 0)
+        {
+          sensor_data.temperature = temperature;
+          sensor_data.humidity = humidity;
+        }
+        else
+        {
+          /* 读数失败，使用默认值 */
+          sensor_data.temperature = 0.0f;
+          sensor_data.humidity = 0.0f;
+        }
+
+        /* 普通发送 */
+        MQTT_Manager_SendSensorDataNormal(&sensor_data);
+      }
+
+      /* 更新发送时间 */
+      last_send_time = HAL_GetTick();
     }
 
     /* 短暂延时，避免CPU空转 */
@@ -505,7 +637,6 @@ uint8_t Process_Sensor_Status(uint8_t *last_combined_state)
   }
 
   snprintf(radar_msg, sizeof(radar_msg), "[RADAR] Target Status: %s\r\n", status_str);
-  DEBUG_SendString(radar_msg);
 
   /* 获取并处理红外传感器状态 */
   IRSensorData_t ir_data;
@@ -542,7 +673,6 @@ uint8_t Process_Sensor_Status(uint8_t *last_combined_state)
     const char* ir_state_str = (ir_stable_state == IR_STATE_PRESENCE) ? "PRESENCE" : "NOBODY";
     snprintf(ir_msg, sizeof(ir_msg), "[IR] State: %s, Pin: %d\r\n",
              ir_state_str, ir_data.pin_level);
-    DEBUG_SendString(ir_msg);
   }
 
   /* 综合判断：两个传感器只要有一个显示有人，综合状态就为有人 */
