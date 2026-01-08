@@ -47,7 +47,7 @@
 #define ESP_RX_BUFFER_SIZE 512  // ESP接收缓冲区大小（与esp.c中一致）
 
 /* WiFi配置 - 请修改为您的WiFi信息 */
-#define WIFI_SSID     "19099"      // WiFi名称
+#define WIFI_SSID     "1901"      // WiFi名称
 #define WIFI_PASSWORD "qjdq1901"  // WiFi密码
 
 /* MQTT配置 */
