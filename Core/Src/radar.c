@@ -235,6 +235,10 @@ static void Radar_Parse_Frame(uint8_t *data, uint16_t len)
         /* 无人时不更新range_cm和power，保持上次的值 */
         /* 重置高信号帧计数器 */
         Radar.target_info.high_power_frames = 0;
+        /* 重置累加值和有效次数 */
+        Radar.target_info.range_sum = 0;
+        Radar.target_info.power_sum = 0;
+        Radar.target_info.valid_count = 0;
         Radar.target_info.last_update_time = HAL_GetTick();
     }
     /* 检测 "have alarm" */
@@ -243,7 +247,12 @@ static void Radar_Parse_Frame(uint8_t *data, uint16_t len)
         /* 如果同时包含详细信息，则解析并更新P值和R值 */
         if (Radar_Parse_TargetInfo(frame_str, &Radar.target_info) == 0)
         {
-            /* 成功解析出详细信息，检查信号强度 */
+            /* 成功解析出详细信息，进行累加 */
+            Radar.target_info.range_sum += Radar.target_info.range_cm;
+            Radar.target_info.power_sum += Radar.target_info.power;
+            Radar.target_info.valid_count++;
+
+            /* 检查信号强度 */
             if (Radar.target_info.power >= RADAR_POWER_THRESHOLD)
             {
                 /* 信号强度高于阈值 */

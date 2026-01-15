@@ -65,6 +65,9 @@ typedef struct {
     uint32_t        last_update_time;/* 最后更新时间 */
     uint8_t         low_power_frames;/* 低信号强度帧计数器 */
     uint8_t         high_power_frames;/* 高信号强度帧计数器（无人->有人转换用） */
+    uint32_t        range_sum;       /* R值累加 (距离累积值) */
+    uint32_t        power_sum;       /* P值累加 (信号强度累积值) */
+    uint16_t        valid_count;     /* 有效次数 (有效数据点数量) */
 } Radar_TargetInfo_t;
 
 /**

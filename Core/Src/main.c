@@ -695,10 +695,12 @@ uint8_t Process_Sensor_Status(uint8_t *last_combined_state)
 
   /* 综合状态：只要有一个传感器检测到有人，综合状态就是有人 */
   uint8_t combined_has_person = (radar_has_person || ir_has_person) ? 1 : 0;
+  /* 注释掉综合状态打印输出
   const char* combined_state_str = combined_has_person ? "PRESENCE" : "NOBODY";
   char combined_msg[128];
   snprintf(combined_msg, sizeof(combined_msg), "[COMBINED] State: %s\r\n", combined_state_str);
   DEBUG_SendString(combined_msg);
+  */
 
   /* 检测综合状态从无人切换到有人 */
   if(combined_has_person == 1 && *last_combined_state == 0)
