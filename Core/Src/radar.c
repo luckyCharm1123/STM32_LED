@@ -203,6 +203,18 @@ Radar_TargetStatus_t RADAR_GetTargetStatus(void)
     return Radar.target_info.status;
 }
 
+/**
+ * @brief  清零累加值和有效次数
+ * @retval None
+ * @details 在获取累加平均值后调用,重置range_sum、power_sum和valid_count
+ */
+void RADAR_ClearAccumulatedData(void)
+{
+    Radar.target_info.range_sum = 0;
+    Radar.target_info.power_sum = 0;
+    Radar.target_info.valid_count = 0;
+}
+
 /* Private functions ---------------------------------------------------------*/
 
 /**
@@ -228,6 +240,12 @@ static void Radar_Parse_Frame(uint8_t *data, uint16_t len)
     memcpy(frame_str, data, copy_len);
     frame_str[copy_len] = '\0';
 
+    /* 调试输出：打印原始雷达帧数据 */
+    char debug_msg[512];
+    snprintf(debug_msg, sizeof(debug_msg), "[RADAR RAW] %s (len=%d)\r\n", frame_str, len);
+    extern void DEBUG_SendString(const char *str);
+    DEBUG_SendString(debug_msg);
+
     /* 检测 "no alarm" */
     if (strstr(frame_str, "no alarm") != NULL)
     {
@@ -251,6 +269,18 @@ static void Radar_Parse_Frame(uint8_t *data, uint16_t len)
             Radar.target_info.range_sum += Radar.target_info.range_cm;
             Radar.target_info.power_sum += Radar.target_info.power;
             Radar.target_info.valid_count++;
+
+            /* 调试输出：打印解析后的数值和累加状态 */
+            char accum_msg[256];
+            snprintf(accum_msg, sizeof(accum_msg),
+                     "[RADAR] R=%d P=%d | sum_R=%" PRIu32 " sum_P=%" PRIu32 " count=%d\r\n",
+                     Radar.target_info.range_cm,
+                     Radar.target_info.power,
+                     Radar.target_info.range_sum,
+                     Radar.target_info.power_sum,
+                     Radar.target_info.valid_count);
+            extern void DEBUG_SendString(const char *str);
+            DEBUG_SendString(accum_msg);
 
             /* 检查信号强度 */
             if (Radar.target_info.power >= RADAR_POWER_THRESHOLD)

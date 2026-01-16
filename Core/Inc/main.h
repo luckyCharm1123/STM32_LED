@@ -41,7 +41,6 @@ extern "C" {
 
 /* Exported constants --------------------------------------------------------*/
 /* USER CODE BEGIN EC */
-#define MQTT_SUBSCRIBE_TOPIC  "settingTopic"  // 订阅的主题
 #define MQTT_PUBLISH_TOPIC   "diantiTopic"  // 发布的主题
 /* USER CODE END EC */
 
@@ -57,6 +56,11 @@ void Error_Handler(void);
 void DEBUG_SendString(const char *str);
 void USART2_SendString(const char *str);
 void Get_STM32_UID(char *uid_str);  /* 获取STM32唯一ID */
+void RELAY_On(void);                /* 打开继电器 */
+void RELAY_Off(void);               /* 关闭继电器 */
+void RELAY_Toggle(void);            /* 切换继电器状态 */
+uint8_t RELAY_GetState(void);       /* 获取继电器状态 */
+void Process_MQTT_Subscribe_Message(void);  /* 处理MQTT订阅消息 */
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
@@ -68,6 +72,8 @@ void Get_STM32_UID(char *uid_str);  /* 获取STM32唯一ID */
 /* USER CODE BEGIN Private defines */
 /* 用户代码开始：私有定义 */
 /* 可以在此处添加自定义的常量和宏定义 */
+#define RELAY_Pin GPIO_PIN_8
+#define RELAY_GPIO_Port GPIOA
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

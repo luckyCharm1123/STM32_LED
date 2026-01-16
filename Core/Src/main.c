@@ -40,7 +40,6 @@
 #include "esp.h"    // ESP-01S模块驱动
 #include "sht30_soft.h"  // SHT30温湿度传感器驱动（软件I2C版本）
 #include "radar.h"  // 毫米波雷达驱动
-#include "ir_sensor.h"  // 红外传感器驱动
 #include "mqtt_manager.h"  // MQTT发送管理器
 #define RX_BUFFER_SIZE 128  // 接收缓冲区大小，最大可接收127个字符+1个结束符
 #define TX_BUFFER_SIZE 128  // 发送缓冲区大小，预留128字节
@@ -75,6 +74,7 @@ uint8_t rx_buffer[1];  // 单字节接收缓冲区
 extern char RxData[512];  // ESP接收缓冲区（从STM32-ESP01S移植）
 extern uint16_t DataPointer;  // ESP接收数据指针
 extern uint8_t CompeteRx;  // ESP接收完成标志
+#define DataSize 512  // ESP缓冲区大小（与esp.c中一致）
 
 /* ESP接收缓冲区（主循环使用） */
 extern uint8_t esp_rx_complete;     // ESP接收完成标志
@@ -92,6 +92,7 @@ uint8_t wifi_config_updated = 0;                // WiFi配置更新标志
 
 /* 设备码 - 基于芯片唯一ID生成 */
 char g_device_code[9];  // 全局设备码，8位十六进制 + 结束符
+char g_mqtt_subscribe_topic[32];  // MQTT订阅话题（基于设备码动态生成）
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -134,11 +135,6 @@ int main(void)
   {
     DEBUG_SendString("[ERR] Radar init failed\r\n");
   }
-  /* 初始化红外传感器模块 */
-  if(IR_SENSOR_Init() != 0)
-  {
-    DEBUG_SendString("[ERR] IR Sensor init failed\r\n");
-  }
   /* 启动串口接收中断，用于接收ESP模块的响应 */
   HAL_UART_Receive_IT(&huart2, &rx_buffer[0], 1);
   /* 生成设备码（基于芯片唯一ID） */
@@ -148,6 +144,16 @@ int main(void)
   snprintf(device_msg, sizeof(device_msg), "Device Code: %s\r\n", g_device_code);
   /* 发送到串口调试 */
   DEBUG_SendString(device_msg);
+
+  /* 生成MQTT订阅话题（基于设备码） */
+  snprintf(g_mqtt_subscribe_topic, sizeof(g_mqtt_subscribe_topic),
+           "dev%s", g_device_code);
+  snprintf(device_msg, sizeof(device_msg), "Subscribe Topic: %s\r\n", g_mqtt_subscribe_topic);
+  DEBUG_SendString(device_msg);
+
+  /* 打开继电器 */
+  RELAY_On();
+  DEBUG_SendString("[RELAY] Relay turned ON\r\n");
 
   /* ESP初始化 - 使用从STM32-ESP01S移植的简化驱动 */
   DEBUG_SendString("\r\n=== ESP01S Initialization ===\r\n");
@@ -168,15 +174,26 @@ int main(void)
   
   /* 订阅MQTT主题 - 接收服务器下发的消息 */
   DEBUG_SendString("\r\n=== MQTT Subscription ===\r\n");
-  if(ESP_SubscribeMQTT(MQTT_SUBSCRIBE_TOPIC) == ESP_OK)
+  char sub_debug_msg[128];
+  snprintf(sub_debug_msg, sizeof(sub_debug_msg), "Subscribing to: %s\r\n", g_mqtt_subscribe_topic);
+  DEBUG_SendString(sub_debug_msg);
+
+  if(ESP_SubscribeMQTT(g_mqtt_subscribe_topic) == ESP_OK)
   {
     char sub_msg[128];
-    snprintf(sub_msg, sizeof(sub_msg), "[OK] Subscribed to topic: %s\r\n\r\n", MQTT_SUBSCRIBE_TOPIC);
+    snprintf(sub_msg, sizeof(sub_msg), "[OK] Subscribed to topic: %s\r\n", g_mqtt_subscribe_topic);
     DEBUG_SendString(sub_msg);
+
+    /* 发送测试消息，验证订阅是否工作 */
+    DEBUG_SendString("[TEST] Sending test message to verify subscription...\r\n");
+    ESP_PublishMQTT(g_mqtt_subscribe_topic, "TEST");
+
+    DEBUG_SendString("[TEST] Please send 'RELAYON' or 'RELAYOFF' to test relay control\r\n\r\n");
   }
   else
   {
-    DEBUG_SendString("[WARN] MQTT subscription failed\r\n");
+    DEBUG_SendString("[ERROR] MQTT subscription failed!\r\n");
+    DEBUG_SendString("[ERROR] Relay control via MQTT will not work\r\n\r\n");
   }
   MQTT_Manager_Init();  
   DEBUG_SendString("[MQTT] Initialization Successful\r\n");
@@ -187,8 +204,8 @@ int main(void)
   static uint32_t last_sensor_output_time = 0;
   const uint32_t sensor_output_interval = 500;  // 500ms输出一次
 
-  /* 综合状态变量 */
-  static uint8_t last_combined_has_person = 0;  // 上次综合状态（0=无人，1=有人）
+  /* 雷达状态变量 */
+  static uint8_t last_radar_has_person = 0;  // 上次雷达状态（0=无人，1=有人）
 
   /* MQTT发送计时变量 */
   static uint32_t last_send_time = 0;  // 上次发送时间
@@ -218,10 +235,10 @@ int main(void)
 
       /* 重新订阅MQTT主题 */
       DEBUG_SendString("\r\n=== MQTT Subscription ===\r\n");
-      if(ESP_SubscribeMQTT(MQTT_SUBSCRIBE_TOPIC) == ESP_OK)
+      if(ESP_SubscribeMQTT(g_mqtt_subscribe_topic) == ESP_OK)
       {
         char sub_msg[128];
-        snprintf(sub_msg, sizeof(sub_msg), "[OK] Subscribed to topic: %s\r\n\r\n", MQTT_SUBSCRIBE_TOPIC);
+        snprintf(sub_msg, sizeof(sub_msg), "[OK] Subscribed to topic: %s\r\n\r\n", g_mqtt_subscribe_topic);
         DEBUG_SendString(sub_msg);
       }
       else
@@ -240,13 +257,56 @@ int main(void)
     /* 处理雷达数据 */
     RADAR_Process();
 
-    /* 处理红外传感器数据 */
-    IR_SENSOR_Process();
+    /* 处理MQTT订阅消息 - 使用RxData缓冲区（ESP模块接收数据到这里） */
+    if(CompeteRx)
+    {
+      DEBUG_SendString("[ESP RX] Data received in RxData buffer!\r\n");
+      Process_MQTT_Subscribe_Message();
+
+      /* 清空缓冲区 */
+      DataPointer = 0;
+      memset(RxData, 0, DataSize);
+      CompeteRx = 0;
+      
+      /* 重置esp_rx_buffer索引，准备接收下一条消息 */
+      esp_rx_index = 0;
+      memset(esp_rx_buffer, 0, ESP_RX_BUFFER_SIZE);
+    }
+
+    /* 每30秒输出一次ESP状态（用于调试） */
+    static uint32_t last_esp_status_time = 0;
+    if(HAL_GetTick() - last_esp_status_time >= 30000)
+    {
+      char esp_status[256];
+      int buffer_len = strlen(RxData);
+      snprintf(esp_status, sizeof(esp_status),
+               "[ESP STATUS] CompeteRx=%d, DataPointer=%d, buffer_len=%d\r\n",
+               CompeteRx, DataPointer, buffer_len);
+      DEBUG_SendString(esp_status);
+
+      /* 如果缓冲区有内容，打印前64个字符 */
+      if(buffer_len > 0)
+      {
+        char buffer_preview[200];
+        int preview_len = (buffer_len > 64) ? 64 : buffer_len;
+        snprintf(buffer_preview, sizeof(buffer_preview),
+                 "[ESP STATUS] Buffer content (%d chars): %.*s\r\n",
+                 preview_len, preview_len, RxData);
+        DEBUG_SendString(buffer_preview);
+      }
+
+      /* 测试：发送一个测试消息到订阅话题，看能否收到自己的消息 */
+      DEBUG_SendString("[TEST] Publishing test message to subscription topic...\r\n");
+      ESP_PublishMQTT(g_mqtt_subscribe_topic, "PING");
+      DEBUG_SendString("[TEST] Message sent. If subscription works, you should see [ESP RX] above.\r\n");
+
+      last_esp_status_time = HAL_GetTick();
+    }
 
     /* 每500ms处理并输出一次传感器状态 */
     if(HAL_GetTick() - last_sensor_output_time >= sensor_output_interval)
     {
-      Process_Sensor_Status(&last_combined_has_person);
+      Process_Sensor_Status(&last_radar_has_person);
       last_sensor_output_time = HAL_GetTick();
     }
 
@@ -258,7 +318,6 @@ int main(void)
 
       /* 获取雷达数据 */
       Radar_TargetInfo_t radar_info;
-      uint8_t radar_has_person = 0;  /* 雷达是否检测到有人 */
       if(RADAR_GetTargetInfo(&radar_info) == 0)
       {
         sensor_data.motion_detected = (radar_info.status == RADAR_TARGET_WITH_INFO) ? 1 : 0;
@@ -268,16 +327,49 @@ int main(void)
            radar_info.status == RADAR_TARGET_WITH_INFO ||
            radar_info.status == RADAR_TARGET_BUFFERING)
         {
-          radar_has_person = 1;
-          /* 有人时，设置距离和信号强度 */
-          sensor_data.radar_raw = radar_info.range_cm;      /* R: 距离 */
-          sensor_data.human_presence = radar_info.power;     /* P: 信号强度 */
+          /* 有人时，使用累加平均值：累加值 ÷ 有效次数 */
+          if(radar_info.valid_count > 0)
+          {
+            sensor_data.radar_raw = (uint16_t)(radar_info.range_sum / radar_info.valid_count);      /* R: 平均距离 */
+            sensor_data.human_presence = (uint8_t)(radar_info.power_sum / radar_info.valid_count);  /* P: 平均信号强度 */
+
+            /* 调试输出：显示累加计算过程 */
+            char calc_msg[256];
+            snprintf(calc_msg, sizeof(calc_msg),
+                     "[MQTT CALC] avg_R=%d avg_P=%d (sum_R=%" PRIu32 " / count=%d, sum_P=%" PRIu32 " / count=%d)\r\n",
+                     sensor_data.radar_raw,
+                     sensor_data.human_presence,
+                     radar_info.range_sum,
+                     radar_info.valid_count,
+                     radar_info.power_sum,
+                     radar_info.valid_count);
+            DEBUG_SendString(calc_msg);
+          }
+          else
+          {
+            /* 如果没有有效数据，使用瞬时值 */
+            sensor_data.radar_raw = radar_info.range_cm;      /* R: 距离 */
+            sensor_data.human_presence = radar_info.power;     /* P: 信号强度 */
+
+            /* 调试输出：使用瞬时值 */
+            char instant_msg[128];
+            snprintf(instant_msg, sizeof(instant_msg),
+                     "[MQTT CALC] instant R=%d P=%d (no accumulation)\r\n",
+                     sensor_data.radar_raw,
+                     sensor_data.human_presence);
+            DEBUG_SendString(instant_msg);
+          }
+          sensor_data.radar_status = 1;                      /* s: 雷达状态 - 有人 */
+
+          /* 清零累加值和有效次数 */
+          RADAR_ClearAccumulatedData();
         }
         else
         {
           /* 无人时，距离和信号强度都为0 */
           sensor_data.radar_raw = 0;
           sensor_data.human_presence = 0;
+          sensor_data.radar_status = 0;                      /* s: 雷达状态 - 无人 */
         }
       }
       else
@@ -285,21 +377,8 @@ int main(void)
         sensor_data.radar_raw = 0;
         sensor_data.human_presence = 0;
         sensor_data.motion_detected = 0;
+        sensor_data.radar_status = 0;
       }
-
-      /* 获取红外传感器数据 */
-      IRSensorData_t ir_data;
-      if(IR_SENSOR_GetData(&ir_data) == 0)
-      {
-        sensor_data.ir_status = (ir_data.state == IR_STATE_PRESENCE) ? 1 : 0;
-      }
-      else
-      {
-        sensor_data.ir_status = 0;
-      }
-
-      /* 综合状态：雷达或红外任一检测到有人即为有人 (与Process_Sensor_Status中的逻辑一致) */
-      sensor_data.static_value = (radar_has_person || sensor_data.ir_status) ? 1 : 0;  /* s: 综合状态 */
 
       /* 根据当前模式选择发送方式 */
       if(MQTT_Manager_GetMode() == MQTT_SEND_MODE_RAPID)
@@ -568,12 +647,64 @@ static void MX_GPIO_Init(void)
   /* USER CODE BEGIN MX_GPIO_Init_2 */
   /* 用户代码开始：GPIO初始化第2区 */
   /* 可以在此处添加GPIO初始化后的自定义代码 */
+
+  /* 配置继电器控制引脚 (PA8) */
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  GPIO_InitStruct.Pin = RELAY_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;    /* 推挽输出模式 */
+  GPIO_InitStruct.Pull = GPIO_NOPULL;            /* 无上下拉 */
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;   /* 低速即可 */
+  HAL_GPIO_Init(RELAY_GPIO_Port, &GPIO_InitStruct);
+
+  /* 初始化继电器为关闭状态(低电平触发模块,高电平=关闭) */
+  HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_SET);
+
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
 /* 用户代码开始：第4区 */
 /* 可以在此处定义自定义函数 */
+
+/**
+  * @brief 打开继电器
+  * @retval None
+  * @details 将PA8引脚设置为低电平，继电器吸合(低电平触发)
+  */
+void RELAY_On(void)
+{
+  HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_RESET);
+}
+
+/**
+  * @brief 关闭继电器
+  * @retval None
+  * @details 将PA8引脚设置为高电平，继电器断开(低电平触发)
+  */
+void RELAY_Off(void)
+{
+  HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_SET);
+}
+
+/**
+  * @brief 切换继电器状态
+  * @retval None
+  * @details 切换PA8引脚的电平状态
+  */
+void RELAY_Toggle(void)
+{
+  HAL_GPIO_TogglePin(RELAY_GPIO_Port, RELAY_Pin);
+}
+
+/**
+  * @brief 获取继电器状态
+  * @retval 1: 继电器打开, 0: 继电器关闭
+  * @details 读取PA8引脚的当前状态(低电平触发)
+  */
+uint8_t RELAY_GetState(void)
+{
+  return HAL_GPIO_ReadPin(RELAY_GPIO_Port, RELAY_Pin) == GPIO_PIN_RESET ? 1 : 0;
+}
 
 /**
   * @brief 获取STM32芯片唯一ID
@@ -599,87 +730,18 @@ void Get_STM32_UID(char *uid_str)
 
 /**
   * @brief 处理传感器状态并输出
-  * @param last_combined_state: 上次综合状态的指针（用于检测状态切换）
-  * @retval 当前综合状态（0=无人，1=有人）
-  * @details 处理雷达和红外传感器状态，输出调试信息，
+  * @param last_combined_state: 上次雷达状态的指针（用于检测状态切换）
+  * @retval 当前雷达状态（0=无人，1=有人）
+  * @details 处理毫米波雷达状态，输出调试信息，
   *          检测状态切换并激活MQTT快速发送模式
   */
 uint8_t Process_Sensor_Status(uint8_t *last_combined_state)
 {
-  /* 红外传感器状态维护变量 */
-  static IRSensorState_t ir_stable_state = IR_STATE_NOBODY;
-  static uint8_t ir_high_count = 0;
-  static uint8_t ir_low_count = 0;
-  const uint8_t IR_THRESHOLD = 5;
-
-  /* 获取并输出雷达目标状态 */
+  /* 获取雷达目标状态 */
   Radar_TargetStatus_t target_status = RADAR_GetTargetStatus();
-  char radar_msg[128];
-
-  const char* status_str;
-  switch(target_status)
-  {
-    case RADAR_TARGET_NOBODY:
-      status_str = "NOBODY";
-      break;
-    case RADAR_TARGET_DETECTED:
-      status_str = "DETECTED";
-      break;
-    case RADAR_TARGET_WITH_INFO:
-      status_str = "WITH_INFO";
-      break;
-    case RADAR_TARGET_BUFFERING:
-      status_str = "BUFFERING";
-      break;
-    default:
-      status_str = "UNKNOWN";
-      break;
-  }
-
-  snprintf(radar_msg, sizeof(radar_msg), "[RADAR] Target Status: %s\r\n", status_str);
-
-  /* 获取并处理红外传感器状态 */
-  IRSensorData_t ir_data;
-  if(IR_SENSOR_GetData(&ir_data) == 0)
-  {
-    /* 状态机维护逻辑 */
-    if(ir_data.pin_level == 1)
-    {
-      /* 当前读到高电平（有人） */
-      ir_high_count++;
-      ir_low_count = 0;
-
-      /* 连续5次高电平，切换到有人状态 */
-      if(ir_high_count >= IR_THRESHOLD)
-      {
-        ir_stable_state = IR_STATE_PRESENCE;
-      }
-    }
-    else
-    {
-      /* 当前读到低电平（无人） */
-      ir_low_count++;
-      ir_high_count = 0;
-
-      /* 连续5次低电平，切换到无人状态 */
-      if(ir_low_count >= IR_THRESHOLD)
-      {
-        ir_stable_state = IR_STATE_NOBODY;
-      }
-    }
-
-    /* 输出稳定状态和当前引脚电平 */
-    char ir_msg[128];
-    const char* ir_state_str = (ir_stable_state == IR_STATE_PRESENCE) ? "PRESENCE" : "NOBODY";
-    snprintf(ir_msg, sizeof(ir_msg), "[IR] State: %s, Pin: %d\r\n",
-             ir_state_str, ir_data.pin_level);
-  }
-
-  /* 综合判断：两个传感器只要有一个显示有人，综合状态就为有人 */
-  uint8_t radar_has_person = 0;
-  uint8_t ir_has_person = 0;
 
   /* 判断雷达状态：DETECTED、WITH_INFO、BUFFERING 都算有人 */
+  uint8_t radar_has_person = 0;
   if(target_status == RADAR_TARGET_DETECTED ||
      target_status == RADAR_TARGET_WITH_INFO ||
      target_status == RADAR_TARGET_BUFFERING)
@@ -687,23 +749,8 @@ uint8_t Process_Sensor_Status(uint8_t *last_combined_state)
     radar_has_person = 1;
   }
 
-  /* 判断红外状态：PRESENCE 算有人 */
-  if(ir_stable_state == IR_STATE_PRESENCE)
-  {
-    ir_has_person = 1;
-  }
-
-  /* 综合状态：只要有一个传感器检测到有人，综合状态就是有人 */
-  uint8_t combined_has_person = (radar_has_person || ir_has_person) ? 1 : 0;
-  /* 注释掉综合状态打印输出
-  const char* combined_state_str = combined_has_person ? "PRESENCE" : "NOBODY";
-  char combined_msg[128];
-  snprintf(combined_msg, sizeof(combined_msg), "[COMBINED] State: %s\r\n", combined_state_str);
-  DEBUG_SendString(combined_msg);
-  */
-
-  /* 检测综合状态从无人切换到有人 */
-  if(combined_has_person == 1 && *last_combined_state == 0)
+  /* 检测雷达状态从无人切换到有人 */
+  if(radar_has_person == 1 && *last_combined_state == 0)
   {
     /* 状态从无人切换到有人，激活MQTT快速发送模式 */
     MQTT_Manager_SetMode(MQTT_SEND_MODE_RAPID);
@@ -714,13 +761,16 @@ uint8_t Process_Sensor_Status(uint8_t *last_combined_state)
       MQTT_Manager_ResetRapidCounter();
     }
 
+    /* 确保继电器打开 */
+    RELAY_On();
+
     DEBUG_SendString("[MQTT] Activated rapid send mode\r\n");
   }
 
-  /* 更新上次的综合状态 */
-  *last_combined_state = combined_has_person;
+  /* 更新上次的雷达状态 */
+  *last_combined_state = radar_has_person;
 
-  return combined_has_person;
+  return radar_has_person;
 }
 
 /**
@@ -741,6 +791,100 @@ void Generate_Device_Code(char *device_code)
 
   // 格式化为8位十六进制字符串
   sprintf(device_code, "%08" PRIX32, uid_0);
+}
+
+/**
+  * @brief 处理MQTT订阅消息
+  * @retval None
+  * @details 检查ESP接收缓冲区中是否有MQTT订阅消息
+  *          如果收到RELAYON或RELAYOFF命令，控制继电器
+  *          消息格式: +MQTTSUBRECV:0,"dev066DFF51",<len>,<data>
+  */
+void Process_MQTT_Subscribe_Message(void)
+{
+  /* 调试：显示原始接收数据（前100字符） */
+  int rx_len = strlen(RxData);
+  char debug_raw[150];
+  snprintf(debug_raw, sizeof(debug_raw), "[MQTT SUB] RxData(%d): %.*s\r\n",
+           rx_len, (rx_len > 100 ? 100 : rx_len), RxData);
+  DEBUG_SendString(debug_raw);
+
+  /* 检查是否有MQTT订阅消息 */
+  char *mqtt_ptr = strstr(RxData, "+MQTTSUBRECV:");
+
+  if(mqtt_ptr != NULL)
+  {
+    DEBUG_SendString("[MQTT SUB] Found MQTTSUBRECV\r\n");
+
+    /* 找到第三个逗号后面的长度和第四个逗号后面的数据 */
+    /* 格式: +MQTTSUBRECV:0,"topic",len,data */
+    char *first_comma = strchr(mqtt_ptr, ',');
+    if(first_comma != NULL)
+    {
+      char *second_comma = strchr(first_comma + 1, ',');
+      if(second_comma != NULL)
+      {
+        char *third_comma = strchr(second_comma + 1, ',');
+        if(third_comma != NULL)
+        {
+          /* 解析长度 */
+          int msg_len = atoi(second_comma + 1);
+
+          /* 调试：打印解析的消息长度 */
+          char len_msg[64];
+          snprintf(len_msg, sizeof(len_msg), "[MQTT SUB] Parsed length: %d\r\n", msg_len);
+          DEBUG_SendString(len_msg);
+
+          /* 数据部分在第三个逗号后面 */
+          char *data_ptr = third_comma + 1;
+
+          /* 调试：打印数据部分 */
+          char data_msg[128];
+          snprintf(data_msg, sizeof(data_msg), "[MQTT SUB] Data part: %.*s\r\n", msg_len, data_ptr);
+          DEBUG_SendString(data_msg);
+
+          /* 检查消息长度和命令 */
+          if(msg_len == 7 && strncmp(data_ptr, "RELAYON", 7) == 0)
+          {
+            /* 收到RELAYON命令，打开继电器 */
+            RELAY_On();
+            DEBUG_SendString("[MQTT] RELAYON received - Relay ON\r\n");
+          }
+          else if(msg_len == 8 && strncmp(data_ptr, "RELAYOFF", 8) == 0)
+          {
+            /* 收到RELAYOFF命令，关闭继电器 */
+            RELAY_Off();
+            DEBUG_SendString("[MQTT] RELAYOFF received - Relay OFF\r\n");
+          }
+          else
+          {
+            /* 未识别的命令 */
+            char unknown_msg[128];
+            snprintf(unknown_msg, sizeof(unknown_msg),
+                     "[MQTT SUB] Unknown command: len=%d, data=%.*s\r\n",
+                     msg_len, msg_len, data_ptr);
+            DEBUG_SendString(unknown_msg);
+          }
+        }
+        else
+        {
+          DEBUG_SendString("[MQTT SUB] Error: third comma not found\r\n");
+        }
+      }
+      else
+      {
+        DEBUG_SendString("[MQTT SUB] Error: second comma not found\r\n");
+      }
+    }
+    else
+    {
+      DEBUG_SendString("[MQTT SUB] Error: first comma not found\r\n");
+    }
+  }
+  else
+  {
+    DEBUG_SendString("[MQTT SUB] No MQTTSUBRECV found in message\r\n");
+  }
 }
 
 /**
@@ -772,10 +916,34 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         {
           // 添加字符串结束符，使ESP驱动层能正确解析响应
           esp_rx_buffer[esp_rx_index] = '\0';
+
+          // 调试：打印所有接收到的以+开头的消息
+          if(esp_rx_buffer[0] == '+')
+          {
+            char debug_msg[200];
+            snprintf(debug_msg, sizeof(debug_msg), "[ISR] Received: %s\r\n", esp_rx_buffer);
+            DEBUG_SendString(debug_msg);
+          }
+
           // 设置ESP接收完成标志
           esp_rx_complete = 1;
           // 设置响应就绪标志，让等待函数能够立即处理
           esp_response_ready = 1;
+
+          // 检查是否是MQTT订阅消息，如果是，复制到RxData缓冲区
+          // 支持两种格式：+MQTTSUBRECV: 和 +MQTTSUBRECV=
+          if(strstr(esp_rx_buffer, "+MQTTSUBRECV:") != NULL ||
+             strstr(esp_rx_buffer, "+MQTTSUBRECV=") != NULL)
+          {
+            // 复制到RxData缓冲区供主循环处理
+            strncpy(RxData, esp_rx_buffer, DataSize - 1);
+            RxData[DataSize - 1] = '\0';
+            DataPointer = strlen(RxData);
+            CompeteRx = 1;  // 设置MQTT消息接收完成标志
+
+            // 调试：立即打印接收到的MQTT订阅消息
+            DEBUG_SendString("[ISR] MQTT SUB message captured, CompeteRx=1\r\n");
+          }
 
           // 注意：不在中断中重置esp_rx_index
           // 索引将在主循环处理完响应后被ESP_SendATCommand重置

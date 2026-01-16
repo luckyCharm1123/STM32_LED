@@ -176,8 +176,8 @@ uint8_t MQTT_Manager_ShouldSend(uint32_t last_send_time)
   * @param sensor_data: 传感器数据指针
   * @retval ESP_OK: 发送成功, ESP_ERROR: 发送失败
   * @details 定时上报，不影响快速发送计数器
-  *          消息格式: dev066DFF51_temp1946_humi2918_radarR390_P14_s1_ir1
-  *          R=距离, P=信号强度, s=综合状态, ir=红外状态
+  *          消息格式: dev066DFF51_temp1946_humi2918_radarR390_P14_s1
+  *          R=距离, P=信号强度, s=雷达状态
   */
 uint8_t MQTT_Manager_SendSensorDataNormal(const MQTT_SensorData_t *sensor_data)
 {
@@ -186,7 +186,7 @@ uint8_t MQTT_Manager_SendSensorDataNormal(const MQTT_SensorData_t *sensor_data)
 
     /* 构造MQTT消息（普通格式） */
     /* temp1946表示19.46℃, humi2918表示29.18% */
-    /* R390表示距离390cm, P14表示信号强度, s1表示综合状态(有人), ir1表示红外检测到有人 */
+    /* R390表示距离390cm, P14表示信号强度, s1表示雷达状态(有人) */
     int temp_val = (int)(sensor_data->temperature * 100);  /* 温度*100 */
     int humi_val = (int)(sensor_data->humidity * 100);    /* 湿度*100 */
 
@@ -194,14 +194,13 @@ uint8_t MQTT_Manager_SendSensorDataNormal(const MQTT_SensorData_t *sensor_data)
     extern char g_device_code[9];
 
     snprintf(mqtt_message, sizeof(mqtt_message),
-             "dev%s_temp%d_humi%d_radarR%d_P%d_s%d_ir%d",
+             "dev%s_temp%d_humi%d_radarR%d_P%d_s%d",
              g_device_code,
              temp_val,
              humi_val,
              sensor_data->radar_raw,           /* R: 距离 */
-             sensor_data->human_presence,       /* P: 信号强度 */
-             sensor_data->static_value,         /* s: 综合状态 */
-             sensor_data->ir_status);           /* ir: 红外状态 */
+             sensor_data->human_presence,      /* P: 信号强度 */
+             sensor_data->radar_status);       /* s: 雷达状态 */
 
     /* 构造MQTT主题 - 使用宏定义 */
     snprintf(topic, sizeof(topic), "%s", MQTT_PUBLISH_TOPIC);
@@ -214,11 +213,11 @@ uint8_t MQTT_Manager_SendSensorDataNormal(const MQTT_SensorData_t *sensor_data)
         /* 发送成功，重置失败计数器 */
         MQTT_Manager_ResetFailCount();
 
-        /* 调试输出 - 只打印消息长度避免截断警告 */
-        char debug_msg[64];
+        /* 调试输出 - 打印完整的MQTT消息 */
+        char debug_msg[512];
         snprintf(debug_msg, sizeof(debug_msg),
-                 "[MQTT] NORMAL Sent (%d bytes)\r\n",
-                 (int)strlen(mqtt_message));
+                 "[MQTT] NORMAL Sent: %s\r\n",
+                 mqtt_message);
         DEBUG_SendString(debug_msg);
 
         return ESP_OK;
@@ -243,8 +242,8 @@ uint8_t MQTT_Manager_SendSensorDataNormal(const MQTT_SensorData_t *sensor_data)
   * @param sensor_data: 传感器数据指针
   * @retval ESP_OK: 发送成功, ESP_ERROR: 发送失败
   * @details 状态变化时触发，会增加快速发送计数器
-  *          消息格式: dev066DFF51_radarR434_P15_s1_ir1
-  *          R=距离, P=信号强度, s=综合状态, ir=红外状态
+  *          消息格式: dev066DFF51_radarR434_P15_s1
+  *          R=距离, P=信号强度, s=雷达状态
   */
 uint8_t MQTT_Manager_SendSensorDataRapid(const MQTT_SensorData_t *sensor_data)
 {
@@ -252,18 +251,17 @@ uint8_t MQTT_Manager_SendSensorDataRapid(const MQTT_SensorData_t *sensor_data)
     char topic[128];
 
     /* 构造MQTT消息（快速格式） */
-    /* R434表示距离434cm, P15表示信号强度, s1表示综合状态(有人), ir1表示红外检测到有人 */
+    /* R434表示距离434cm, P15表示信号强度, s1表示雷达状态(有人) */
 
     /* 外部声明设备码 */
     extern char g_device_code[9];
 
     snprintf(mqtt_message, sizeof(mqtt_message),
-             "dev%s_radarR%d_P%d_s%d_ir%d",
+             "dev%s_radarR%d_P%d_s%d",
              g_device_code,
              sensor_data->radar_raw,           /* R: 距离 */
-             sensor_data->human_presence,       /* P: 信号强度 */
-             sensor_data->static_value,         /* s: 综合状态 */
-             sensor_data->ir_status);           /* ir: 红外状态 */
+             sensor_data->human_presence,      /* P: 信号强度 */
+             sensor_data->radar_status);       /* s: 雷达状态 */
 
     /* 构造MQTT主题 - 使用宏定义 */
     snprintf(topic, sizeof(topic), "%s", MQTT_PUBLISH_TOPIC);
@@ -279,11 +277,11 @@ uint8_t MQTT_Manager_SendSensorDataRapid(const MQTT_SensorData_t *sensor_data)
         /* 增加快速发送计数器 */
         MQTT_Manager_IncrementRapidCounter();
 
-        /* 调试输出 - 只打印消息长度避免截断警告 */
-        char debug_msg[128];
+        /* 调试输出 - 打印完整的MQTT消息 */
+        char debug_msg[512];
         snprintf(debug_msg, sizeof(debug_msg),
-                 "[MQTT] RAPID Sent (%d bytes) [%d/%d]\r\n",
-                 (int)strlen(mqtt_message),
+                 "[MQTT] RAPID Sent: %s [%d/%d]\r\n",
+                 mqtt_message,
                  mqtt_mgr.rapid_send_count, mqtt_mgr.max_rapid_send);
         DEBUG_SendString(debug_msg);
 

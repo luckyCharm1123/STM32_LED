@@ -147,6 +147,13 @@ int8_t RADAR_GetTargetInfo(Radar_TargetInfo_t *info);
  */
 Radar_TargetStatus_t RADAR_GetTargetStatus(void);
 
+/**
+ * @brief  清零累加值和有效次数
+ * @retval None
+ * @details 在获取累加平均值后调用,重置range_sum、power_sum和valid_count
+ */
+void RADAR_ClearAccumulatedData(void);
+
 /* Exported variables --------------------------------------------------------*/
 extern Radar_t Radar;  /* 雷达控制结构体 */
 

@@ -56,9 +56,8 @@ typedef struct {
     float humidity;          ///< 湿度值（%）
     uint8_t human_presence;  ///< 雷达信号强度 P (用于MQTT消息)
     uint8_t motion_detected; ///< 运动检测状态（0=无运动，1=有运动）
-    uint8_t ir_status;       ///< 红外传感器状态 ir（0=无人，1=有人）
     uint16_t radar_raw;      ///< 雷达距离 R（厘米，用于MQTT消息）
-    uint8_t static_value;    ///< 综合状态 s（0=无人，1=有人，雷达或红外任一检测到即为有人）
+    uint8_t radar_status;    ///< 毫米波雷达状态 s（0=无人，1=有人）
 } MQTT_SensorData_t;
 
 /* ==================== 函数声明 ==================== */
@@ -132,8 +131,8 @@ uint8_t MQTT_Manager_ShouldSend(uint32_t last_send_time);
   * @param sensor_data: 传感器数据指针
   * @retval ESP_OK: 发送成功, ESP_ERROR: 发送失败
   * @details 定时上报，不影响快速发送计数器
-  *          消息格式: dev{设备ID}_temp1946_humi2918_radarR390_P14_s1_ir1
-  *          R=距离, P=信号强度, s=综合状态, ir=红外状态
+  *          消息格式: dev{设备ID}_temp1946_humi2918_radarR390_P14_s1
+  *          R=距离, P=信号强度, s=雷达状态
   *          设备ID由g_device_code全局变量提供
   */
 uint8_t MQTT_Manager_SendSensorDataNormal(const MQTT_SensorData_t *sensor_data);
@@ -143,8 +142,8 @@ uint8_t MQTT_Manager_SendSensorDataNormal(const MQTT_SensorData_t *sensor_data);
   * @param sensor_data: 传感器数据指针
   * @retval ESP_OK: 发送成功, ESP_ERROR: 发送失败
   * @details 状态变化时触发，会增加快速发送计数器
-  *          消息格式: dev{设备ID}_radarR434_P15_s1_ir1
-  *          R=距离, P=信号强度, s=综合状态, ir=红外状态
+  *          消息格式: dev{设备ID}_radarR434_P15_s1
+  *          R=距离, P=信号强度, s=雷达状态
   *          设备ID由g_device_code全局变量提供
   */
 uint8_t MQTT_Manager_SendSensorDataRapid(const MQTT_SensorData_t *sensor_data);

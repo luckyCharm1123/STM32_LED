@@ -27,7 +27,6 @@ set(MX_Application_Src
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/esp.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/sht30_soft.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/radar.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../Core/Src/ir_sensor.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../../startup_stm32f103xb.s
 )
 

@@ -289,7 +289,6 @@ void USART2_IRQHandler(void)
   /* USER CODE BEGIN USART2_IRQn 0 */
   extern char RxData[512];  // ESP接收缓冲区
   extern uint16_t DataPointer;  // ESP接收数据指针
-  extern uint8_t CompeteRx;  // ESP接收完成标志
 
   /* 检查接收中断标志 */
   if(__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE) != RESET)
