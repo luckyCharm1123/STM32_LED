@@ -240,11 +240,7 @@ static void Radar_Parse_Frame(uint8_t *data, uint16_t len)
     memcpy(frame_str, data, copy_len);
     frame_str[copy_len] = '\0';
 
-    /* 调试输出：打印原始雷达帧数据 */
-    char debug_msg[512];
-    snprintf(debug_msg, sizeof(debug_msg), "[RADAR RAW] %s (len=%d)\r\n", frame_str, len);
-    extern void DEBUG_SendString(const char *str);
-    DEBUG_SendString(debug_msg);
+    /* 调试输出：打印原始雷达帧数据（已关闭） */
 
     /* 检测 "no alarm" */
     if (strstr(frame_str, "no alarm") != NULL)

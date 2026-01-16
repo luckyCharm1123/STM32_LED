@@ -51,6 +51,22 @@ DMA_HandleTypeDef hdma_usart3_rx;  // USART3接收DMA句柄
 
 /* 动态WiFi配置变量 */
 char g_device_code[9];  // 全局设备码，8位十六进制 + 结束符
+static char g_lora_mac[5] = {0};      // 保存配置后的MAC(4字符)
+static char g_lora_channel[3] = {0};  // 保存配置后的CHANNEL(2字符)
+static uint8_t g_lora_configured = 0;
+static uint8_t g_getdata_miss_count = 0; // 连续未收到getData的次数
+
+/* 状态发送机结构体 */
+typedef struct
+{
+  uint8_t  send_state;       /* 发送状态 */
+  uint32_t last_send_time;   /* 上次发送时间(ms) */
+  uint32_t interval_ms;      /* 当前发送间隔(ms) */
+  uint8_t  fast_remaining;   /* 快速模式剩余次数 */
+  uint8_t  initialized;      /* 是否已初始化 */
+} StateSender_t;
+
+static StateSender_t g_state_sender = {0};
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -66,6 +82,17 @@ void DEBUG_SendString(const char *str);    // USART1调试串口发送函数原�
 void Get_STM32_UID(char *uid_str);         // 获取STM32芯片唯一ID
 void Generate_Device_Code(char *device_code);  // 生成8位设备码
 uint8_t Process_Sensor_Status(uint8_t *last_combined_state);  // 处理传感器状态并返回综合状态
+void StateSender_Init(void);               // 初始化状态发送机
+void StateSender_Update(void);             // 状态发送机更新
+int StateSender_SendFast(void);            // 快速发送函数
+int StateSender_SendNormal(void);          // 正常发送函数
+void StateSender_ResetFastMode(void);      // 进入/重置快速发送模式
+void LORA_ReinitAndConfig(void);           // 重新初始化LoRa并配置MAC/CHANNEL
+Radar_TargetStatus_t StateSender_GetRadarStatus(void);  // 获取毫米波雷达状态
+uint32_t StateSender_GetRadarPowerSum(void);            // 获取P值总值
+uint32_t StateSender_GetRadarRangeSum(void);            // 获取R值总值
+uint16_t StateSender_GetRadarValidCount(void);          // 获取有效次数
+int StateSender_GetTempHumi(float *temp, float *humi);  // 获取温湿度
 /**
   * @brief USART1发送调试信息
   * @param str: 要发送的调试字符串，以'\0'结尾
@@ -153,6 +180,10 @@ int main(void)
       uint8_t lora_rx_data[256];
       uint16_t lora_rx_len = LORA_GetData(lora_rx_data, sizeof(lora_rx_data));
 
+      /* 重启UART接收中断，准备接收下一帧数据 */
+      extern uint8_t lora_rx_byte;
+      HAL_UART_Receive_IT(&huart2, &lora_rx_byte, 1);
+
       if(lora_rx_len > 0)
       {
         char debug_msg[512];
@@ -162,102 +193,161 @@ int main(void)
                  "[LORA] My Device ID: %s\r\n", g_device_code);
         DEBUG_SendString(debug_msg);
 
-        /* 使用ASCII字符串格式解析函数 */
-        char payload[256];
-        int payload_len = LORA_ParseStringPacket(
-                            lora_rx_data, lora_rx_len,
-                            g_device_code, payload, sizeof(payload));
+        /* 按\r\n拆包处理 */
+        char rx_str[257];
+        uint16_t copy_len = (lora_rx_len < sizeof(rx_str) - 1) ? lora_rx_len : (sizeof(rx_str) - 1);
+        memcpy(rx_str, lora_rx_data, copy_len);
+        rx_str[copy_len] = '\0';
 
-        if(payload_len > 0)
+        char *saveptr = NULL;
+        uint8_t getdata_handled = 0;
+        char last_line[256] = {0};
+        char *line = strtok_r(rx_str, "\r\n", &saveptr);
+        while(line != NULL)
         {
-          /* 成功提取到负载内容 */
-          char debug_msg[512];
-          snprintf(debug_msg, sizeof(debug_msg),
-                   "[LORA RX] Command received: %s\r\n", payload);
-          DEBUG_SendString(debug_msg);
-
-          /* 处理setting命令: settingMACCHANNEL */
-          if(strncmp(payload, "setting", 7) == 0)
+          if(line[0] != '\0')
           {
-            /* 提取setting后面的参数 */
-            char *params = &payload[7];  /* 跳过"setting" */
-            uint16_t params_len = strlen(params);
-
-            snprintf(debug_msg, sizeof(debug_msg),
-                     "[LORA] Params length: %d, Params content: %s\r\n",
-                     params_len, params);
-            DEBUG_SendString(debug_msg);
-
-            DEBUG_SendString("[LORA] Processing configuration command\r\n");
-
-            /* 解析MAC和CHANNEL (格式: MAC4字符+CHANNEL2字符) */
-            if(params_len >= 6)  /* 至少需要4字符MAC+2字符CHANNEL */
+            /* 跳过同一批次重复行 */
+            if(strcmp(line, last_line) == 0)
             {
-              /* 前面4个字符是MAC,后面2个字符是CHANNEL */
-              char mac[5];
-              char channel[3];
+              line = strtok_r(NULL, "\r\n", &saveptr);
+              continue;
+            }
+            strncpy(last_line, line, sizeof(last_line) - 1);
+            last_line[sizeof(last_line) - 1] = '\0';
 
-              /* 提取MAC (4个字符) */
-              memcpy(mac, params, 4);
-              mac[4] = '\0';
+            /* 过滤常见无关回显 */
+            if(strcmp(line, "getData") == 0 || strcmp(line, "OK") == 0 || strcmp(line, "Power on") == 0)
+            {
+              line = strtok_r(NULL, "\r\n", &saveptr);
+              continue;
+            }
 
-              /* 提取CHANNEL (2个字符) */
-              memcpy(channel, &params[4], 2);
-              channel[2] = '\0';
+            /* 长度不足设备ID的直接忽略 */
+            if(strlen(line) < strlen(g_device_code))
+            {
+              line = strtok_r(NULL, "\r\n", &saveptr);
+              continue;
+            }
 
-              /* 打印解析结果 */
+            /* 使用ASCII字符串格式解析函数 */
+            char payload[256];
+            int payload_len = LORA_ParseStringPacket(
+                                (uint8_t *)line, strlen(line),
+                                g_device_code, payload, sizeof(payload));
+
+            if(payload_len > 0)
+            {
+              /* 成功提取到负载内容 */
               snprintf(debug_msg, sizeof(debug_msg),
-                       "[LORA] MAC: %s, CHANNEL: %s\r\n", mac, channel);
+                       "[LORA RX] Command received: %s\r\n", payload);
               DEBUG_SendString(debug_msg);
 
-              /* 调用LoRa MAC和CHANNEL配置函数 */
-              if(LORA_ConfigureMacAndChannel(mac, channel) == 0)
+              /* 处理setting命令: settingMACCHANNEL */
+              if(strncmp(payload, "setting", 7) == 0)
               {
-                DEBUG_SendString("[LORA] MAC and CHANNEL configured successfully\r\n");
+                /* 提取setting后面的参数 */
+                char *params = &payload[7];  /* 跳过"setting" */
+                uint16_t params_len = strlen(params);
 
-                /* 配置成功后发送确认消息: ok+MAC+CHANNEL+设备码 (6a6a4a前缀由发送函数自动添加) */
-                char confirm_msg[32];
-                snprintf(confirm_msg, sizeof(confirm_msg), "ok%s%s%s", mac, channel, g_device_code);
+                snprintf(debug_msg, sizeof(debug_msg),
+                         "[LORA] Params length: %d, Params content: %s\r\n",
+                         params_len, params);
+                DEBUG_SendString(debug_msg);
 
-                if(LORA_SendFormattedData(confirm_msg) == 0)
+                DEBUG_SendString("[LORA] Processing configuration command\r\n");
+
+                /* 解析MAC和CHANNEL (格式: MAC4字符+CHANNEL2字符) */
+                if(params_len >= 6)  /* 至少需要4字符MAC+2字符CHANNEL */
                 {
-                  DEBUG_SendString("[LORA] Configuration confirmation sent successfully\r\n");
+                  /* 前面4个字符是MAC,后面2个字符是CHANNEL */
+                  char mac[5];
+                  char channel[3];
+
+                  /* 提取MAC (4个字符) */
+                  memcpy(mac, params, 4);
+                  mac[4] = '\0';
+
+                  /* 提取CHANNEL (2个字符) */
+                  memcpy(channel, &params[4], 2);
+                  channel[2] = '\0';
+
+                  /* 打印解析结果 */
+                  snprintf(debug_msg, sizeof(debug_msg),
+                           "[LORA] MAC: %s, CHANNEL: %s\r\n", mac, channel);
+                  DEBUG_SendString(debug_msg);
+
+                  /* 调用LoRa MAC和CHANNEL配置函数 */
+                  if(LORA_ConfigureMacAndChannel(mac, channel) == 0)
+                  {
+                    DEBUG_SendString("[LORA] MAC and CHANNEL configured successfully\r\n");
+
+                    /* 保存MAC和CHANNEL，标记已配置 */
+                    memcpy(g_lora_mac, mac, sizeof(g_lora_mac));
+                    memcpy(g_lora_channel, channel, sizeof(g_lora_channel));
+                    g_lora_configured = 1;
+                    g_getdata_miss_count = 0;
+
+                    /* 设备已获得MAC和CHANNEL，初始化状态发送机 */
+                    StateSender_Init();
+
+                    /* 配置成功后发送确认消息: ok+MAC+CHANNEL+设备码 (6a6a4a前缀由发送函数自动添加) */
+                    char confirm_msg[32];
+                    snprintf(confirm_msg, sizeof(confirm_msg), "ok%s%s%s", mac, channel, g_device_code);
+
+                    if(LORA_SendFormattedData(confirm_msg) == 0)
+                    {
+                      DEBUG_SendString("[LORA] Configuration confirmation sent successfully\r\n");
+                    }
+                    else
+                    {
+                      DEBUG_SendString("[LORA] ERROR: Failed to send configuration confirmation\r\n");
+                    }
+                  }
+                  else
+                  {
+                    DEBUG_SendString("[LORA] ERROR: Failed to configure MAC and CHANNEL\r\n");
+                  }
                 }
                 else
                 {
-                  DEBUG_SendString("[LORA] ERROR: Failed to send configuration confirmation\r\n");
+                  DEBUG_SendString("[LORA] ERROR: Invalid params format (need MAC+CHANNEL)\r\n");
                 }
+              }
+              /* 处理继电器命令 */
+              else if(strncmp(payload, "ON", 2) == 0)
+              {
+                RELAY_On();
+                DEBUG_SendString("[RELAY] Turned ON via LoRa\r\n");
+              }
+              else if(strncmp(payload, "getData", 7) == 0)
+              {
+                /* 同一批次只处理一次getData */
+                if(!getdata_handled)
+                {
+                  g_getdata_miss_count = 0;
+                  DEBUG_SendString("[LORA] getData received, miss counter reset\r\n");
+                  getdata_handled = 1;
+                }
+              }
+              else if(strncmp(payload, "OFF", 3) == 0)
+              {
+                RELAY_Off();
+                DEBUG_SendString("[RELAY] Turned OFF via LoRa\r\n");
               }
               else
               {
-                DEBUG_SendString("[LORA] ERROR: Failed to configure MAC and CHANNEL\r\n");
+                DEBUG_SendString("[LORA] Unknown command\r\n");
               }
             }
             else
             {
-              DEBUG_SendString("[LORA] ERROR: Invalid params format (need MAC+CHANNEL)\r\n");
+              /* 解析失败或不是发给本设备的数据 */
+              DEBUG_SendString("[LORA RX] Packet ignored (invalid or not for this device)\r\n");
             }
           }
-          /* 处理继电器命令 */
-          else if(strncmp(payload, "ON", 2) == 0)
-          {
-            RELAY_On();
-            DEBUG_SendString("[RELAY] Turned ON via LoRa\r\n");
-          }
-          else if(strncmp(payload, "OFF", 3) == 0)
-          {
-            RELAY_Off();
-            DEBUG_SendString("[RELAY] Turned OFF via LoRa\r\n");
-          }
-          else
-          {
-            DEBUG_SendString("[LORA] Unknown command\r\n");
-          }
-        }
-        else
-        {
-          /* 解析失败或不是发给本设备的数据 */
-          DEBUG_SendString("[LORA RX] Packet ignored (invalid or not for this device)\r\n");
+
+          line = strtok_r(NULL, "\r\n", &saveptr);
         }
       }
     }
@@ -267,6 +357,17 @@ int main(void)
     {
       Process_Sensor_Status(&last_radar_has_person);
       last_sensor_output_time = HAL_GetTick();
+    }
+
+    /* 状态发送机调度 */
+    StateSender_Update();
+
+    /* 连续3次未收到getData，重启LoRa并重新配置 */
+    if(g_lora_configured && g_getdata_miss_count >= 3)
+    {
+      DEBUG_SendString("[LORA] getData timeout x3, reinitializing...\r\n");
+      LORA_ReinitAndConfig();
+      g_getdata_miss_count = 0;
     }
 
     /* 短暂延时，避免CPU空转 */
@@ -611,6 +712,9 @@ uint8_t Process_Sensor_Status(uint8_t *last_combined_state)
     /* 确保继电器打开 */
     RELAY_On();
 
+    /* 有人触发：重置为快速发送模式（10次，5s） */
+    StateSender_ResetFastMode();
+
     DEBUG_SendString("[SENSOR] Person detected\r\n");
   }
   else if(radar_has_person == 0 && *last_combined_state == 1)
@@ -622,6 +726,261 @@ uint8_t Process_Sensor_Status(uint8_t *last_combined_state)
   *last_combined_state = radar_has_person;
 
   return radar_has_person;
+}
+
+/**
+  * @brief 初始化状态发送机
+  * @retval None
+  * @details 初始化发送状态和时间戳
+  */
+void StateSender_Init(void)
+{
+  g_state_sender.send_state = 0;
+  g_state_sender.last_send_time = HAL_GetTick();
+  g_state_sender.interval_ms = 5000;  /* 快速发送间隔 5s */
+  g_state_sender.fast_remaining = 10; /* 快速发送次数 */
+  g_state_sender.initialized = 1;
+  DEBUG_SendString("[STATE] State sender initialized (fast mode)\r\n");
+}
+
+/**
+  * @brief 进入/重置快速发送模式
+  * @retval None
+  */
+void StateSender_ResetFastMode(void)
+{
+  g_state_sender.interval_ms = 5000;
+  g_state_sender.fast_remaining = 10;
+  g_state_sender.last_send_time = HAL_GetTick();
+  DEBUG_SendString("[STATE] Fast mode reset (10 times)\r\n");
+}
+
+/**
+  * @brief 状态发送机更新
+  * @retval None
+  * @details 快速模式发送10次(5s间隔)，之后切换到15s间隔
+  */
+void StateSender_Update(void)
+{
+  if(!g_state_sender.initialized)
+  {
+    return;
+  }
+
+  uint32_t now = HAL_GetTick();
+  if(now - g_state_sender.last_send_time < g_state_sender.interval_ms)
+  {
+    return;
+  }
+
+  /* 触发一次发送 */
+  if(g_state_sender.fast_remaining > 0)
+  {
+    (void)StateSender_SendFast();
+  }
+  else
+  {
+    (void)StateSender_SendNormal();
+  }
+  g_state_sender.send_state++;
+  g_state_sender.last_send_time = now;
+
+  /* 处理快速模式次数 */
+  if(g_state_sender.fast_remaining > 0)
+  {
+    g_state_sender.fast_remaining--;
+    if(g_state_sender.fast_remaining == 0)
+    {
+      g_state_sender.interval_ms = 15000;  /* 正常发送间隔 15s */
+      DEBUG_SendString("[STATE] Switch to normal mode (15s)\r\n");
+    }
+  }
+}
+
+/**
+  * @brief 快速发送函数
+  * @retval 0: 成功, -1: 失败
+  * @details 发送格式: dev_设备码P_平均P值R_平均R值S_状态
+  */
+int StateSender_SendFast(void)
+{
+  /* 雷达状态：缓冲/有人=1，无人=0 */
+  Radar_TargetStatus_t status = StateSender_GetRadarStatus();
+  uint8_t s_val = (status == RADAR_TARGET_NOBODY) ? 0 : 1;
+
+  uint16_t valid_count = StateSender_GetRadarValidCount();
+  uint32_t p_sum = StateSender_GetRadarPowerSum();
+  uint32_t r_sum = StateSender_GetRadarRangeSum();
+
+  uint32_t p_avg = 0;
+  uint32_t r_avg = 0;
+  if(s_val == 1 && valid_count > 0)
+  {
+    p_avg = p_sum / valid_count;
+    r_avg = r_sum / valid_count;
+  }
+
+  char payload[64];
+  snprintf(payload, sizeof(payload), "dev_%sP_%luR_%luS_%u", g_device_code, (unsigned long)p_avg, (unsigned long)r_avg, s_val);
+
+  if(LORA_SendFormattedData(payload) == 0)
+  {
+    /* 发送完成后重置毫米波雷达累积值 */
+    RADAR_ClearAccumulatedData();
+    g_getdata_miss_count++;
+    DEBUG_SendString("[STATE] Fast status sent\r\n");
+    return 0;
+  }
+
+  DEBUG_SendString("[STATE] Fast status send failed\r\n");
+  return -1;
+}
+
+/**
+  * @brief 正常发送函数
+  * @retval 0: 成功, -1: 失败
+  * @details 发送格式: dev_设备码humi_湿度值temp_温度值P_平均P值R_平均R值S_状态
+  */
+int StateSender_SendNormal(void)
+{
+  float temp = 0.0f;
+  float humi = 0.0f;
+  (void)StateSender_GetTempHumi(&temp, &humi);
+
+  /* 雷达状态：缓冲/有人=1，无人=0 */
+  Radar_TargetStatus_t status = StateSender_GetRadarStatus();
+  uint8_t s_val = (status == RADAR_TARGET_NOBODY) ? 0 : 1;
+
+  uint16_t valid_count = StateSender_GetRadarValidCount();
+  uint32_t p_sum = StateSender_GetRadarPowerSum();
+  uint32_t r_sum = StateSender_GetRadarRangeSum();
+
+  uint32_t p_avg = 0;
+  uint32_t r_avg = 0;
+  if(s_val == 1 && valid_count > 0)
+  {
+    p_avg = p_sum / valid_count;
+    r_avg = r_sum / valid_count;
+  }
+
+  /* 温湿度保留2位小数，*100发送为整数（如 22.34 -> 2234） */
+  int32_t humi100 = (int32_t)(humi * 100.0f + (humi >= 0 ? 0.5f : -0.5f));
+  int32_t temp100 = (int32_t)(temp * 100.0f + (temp >= 0 ? 0.5f : -0.5f));
+
+  char payload[96];
+  snprintf(payload, sizeof(payload), "dev_%shumi_%ldtemp_%ldP_%luR_%luS_%u",
+           g_device_code,
+           (long)humi100, (long)temp100,
+           (unsigned long)p_avg, (unsigned long)r_avg, s_val);
+
+  if(LORA_SendFormattedData(payload) == 0)
+  {
+    /* 发送完成后重置毫米波雷达累积值 */
+    RADAR_ClearAccumulatedData();
+    g_getdata_miss_count++;
+    DEBUG_SendString("[STATE] Normal status sent\r\n");
+    return 0;
+  }
+
+  DEBUG_SendString("[STATE] Normal status send failed\r\n");
+  return -1;
+}
+
+/**
+  * @brief 获取毫米波雷达状态
+  * @retval Radar_TargetStatus_t 雷达状态
+  */
+Radar_TargetStatus_t StateSender_GetRadarStatus(void)
+{
+  return RADAR_GetTargetStatus();
+}
+
+/**
+  * @brief 获取P值总值
+  * @retval P值累积总和
+  */
+uint32_t StateSender_GetRadarPowerSum(void)
+{
+  return Radar.target_info.power_sum;
+}
+
+/**
+  * @brief 获取R值总值
+  * @retval R值累积总和
+  */
+uint32_t StateSender_GetRadarRangeSum(void)
+{
+  return Radar.target_info.range_sum;
+}
+
+/**
+  * @brief 获取有效次数
+  * @retval 有效数据次数
+  */
+uint16_t StateSender_GetRadarValidCount(void)
+{
+  return Radar.target_info.valid_count;
+}
+
+/**
+  * @brief 获取温湿度
+  * @param temp: 温度输出指针
+  * @param humi: 湿度输出指针
+  * @retval 0: 成功, -1: 失败
+  */
+int StateSender_GetTempHumi(float *temp, float *humi)
+{
+  if(temp == NULL || humi == NULL)
+  {
+    return -1;
+  }
+
+  return (SHT30_Soft_Read(temp, humi) == 0) ? 0 : -1;
+}
+
+/**
+  * @brief 重新初始化LoRa并配置MAC/CHANNEL
+  * @retval None
+  */
+void LORA_ReinitAndConfig(void)
+{
+  /* 进入AT模式需要前后静默窗口，这里在重初始化前保持2s静默 */
+  DEBUG_SendString("[LORA] Starting reinitialization...\r\n");
+
+  /* 清空LoRa接收缓冲区 */
+  extern LORA_Status_t lora_status;
+  lora_status.rx_length = 0;
+  lora_status.data_ready = 0;
+  memset(lora_status.rx_buffer, 0, LORA_RX_BUFFER_SIZE);
+
+  /* 清空UART的错误标志和接收缓冲区 */
+  __HAL_UART_CLEAR_OREFLAG(&huart2);
+  __HAL_UART_CLEAR_FEFLAG(&huart2);
+  __HAL_UART_CLEAR_NEFLAG(&huart2);
+  __HAL_UART_CLEAR_IDLEFLAG(&huart2);
+
+  /* 保持2秒静默,确保没有任何数据传输 */
+  DEBUG_SendString("[LORA] Waiting 2s for silence...\r\n");
+  HAL_Delay(2000);
+
+  DEBUG_SendString("[LORA] Calling LORA_Init...\r\n");
+  if(LORA_Init(9600) != 0)
+  {
+    DEBUG_SendString("[LORA] Reinit failed\r\n");
+    return;
+  }
+
+  if(g_lora_configured)
+  {
+    if(LORA_ConfigureMacAndChannel(g_lora_mac, g_lora_channel) == 0)
+    {
+      DEBUG_SendString("[LORA] Re-configured MAC/CHANNEL successfully\r\n");
+    }
+    else
+    {
+      DEBUG_SendString("[LORA] Re-config MAC/CHANNEL failed\r\n");
+    }
+  }
 }
 
 /**
@@ -659,6 +1018,62 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
   {
       // 调用雷达驱动的UART事件回调函数
       RADAR_UART_RxEventCallback(huart, Size);
+  }
+}
+
+/**
+  * @brief UART错误回调函数（雷达DMA接收恢复）
+  * @param huart: UART句柄
+  * @retval None
+  * @details 处理USART3接收过程中的ORE/FE/NE/PE错误，清标志并重启DMA接收
+  */
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+  if(huart->Instance == USART3)
+  {
+    static uint32_t last_err_log_time = 0;
+    static uint32_t err_count = 0;
+    uint32_t err = huart->ErrorCode;
+
+    /* 清除常见错误标志 */
+    __HAL_UART_CLEAR_OREFLAG(huart);
+    __HAL_UART_CLEAR_FEFLAG(huart);
+    __HAL_UART_CLEAR_NEFLAG(huart);
+    __HAL_UART_CLEAR_PEFLAG(huart);
+
+    /* 终止当前接收并重启DMA空闲接收 */
+    (void)HAL_UART_AbortReceive(huart);
+    if(HAL_UARTEx_ReceiveToIdle_DMA(huart, Radar.rx_buffer, sizeof(Radar.rx_buffer)) == HAL_OK)
+    {
+      Radar.old_pos = 0;
+      Radar.accum_len = 0;
+      Radar.frame_ready = 0;
+      Radar.state = RADAR_STATE_OK;
+      uint32_t now = HAL_GetTick();
+      if(now - last_err_log_time >= 1000)
+      {
+        char err_msg[128];
+        err_count++;
+        snprintf(err_msg, sizeof(err_msg), "[RADAR] UART error recovered, RX restarted (err=0x%08lX cnt=%lu)\r\n",
+                 (unsigned long)err, (unsigned long)err_count);
+        DEBUG_SendString(err_msg);
+        last_err_log_time = now;
+      }
+    }
+    else
+    {
+      Radar.state = RADAR_STATE_ERROR;
+      uint32_t now = HAL_GetTick();
+      if(now - last_err_log_time >= 1000)
+      {
+        char err_msg[128];
+        err_count++;
+        snprintf(err_msg, sizeof(err_msg), "[RADAR] UART error recovery failed (err=0x%08lX cnt=%lu)\r\n",
+                 (unsigned long)err, (unsigned long)err_count);
+        DEBUG_SendString(err_msg);
+        last_err_log_time = now;
+      }
+    }
   }
 }
 

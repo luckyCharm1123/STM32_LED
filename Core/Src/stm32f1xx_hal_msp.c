@@ -250,7 +250,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart)
     /* 配置USART3_RX引脚 (PB11) */
     GPIO_InitStruct.Pin = GPIO_PIN_11;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_INPUT;       // 复用输入模式
-    GPIO_InitStruct.Pull = GPIO_NOPULL;              // 无上下拉
+    GPIO_InitStruct.Pull = GPIO_PULLUP;              // 上拉，降低空闲噪声
     HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
     /* USART3中断配置 */
@@ -268,7 +268,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart)
     hdma_usart3_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;  // 外设字节对齐
     hdma_usart3_rx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;     // 内存字节对齐
     hdma_usart3_rx.Init.Mode = DMA_CIRCULAR;               // 循环模式
-    hdma_usart3_rx.Init.Priority = DMA_PRIORITY_LOW;       // 优先级低
+    hdma_usart3_rx.Init.Priority = DMA_PRIORITY_HIGH;      // 优先级高
 
     /* 关联DMA到USART3 */
     __HAL_LINKDMA(&huart3, hdmarx, hdma_usart3_rx);

@@ -31,7 +31,7 @@ extern void DEBUG_SendString(const char *str);  // 调试输出函数
 LORA_Status_t lora_status = {0};
 
 /* 私有变量 */
-static uint8_t lora_rx_byte;  // 单字节接收缓冲区（用于中断接收）
+uint8_t lora_rx_byte;  // 单字节接收缓冲区（用于中断接收）- 需被main.c访问
 
 /* ==================== 私有常量定义 ==================== */
 
@@ -43,6 +43,7 @@ static uint8_t lora_rx_byte;  // 单字节接收缓冲区（用于中断接收�
 #define LORA_AT_RESPONSE_DELAY_XLONG 2000   // 超长延迟(ms,用于重启)
 #define LORA_RX_BUFFER_MAX_DISPLAY   200    // 接收数据显示最大长度
 #define LORA_DEBUG_MSG_SIZE          512    // 调试消息缓冲区大小
+#define LORA_PACKET_END              "\r\n" // 数据结束标识
 
 /* ==================== 私有函数声明 ==================== */
 
@@ -97,6 +98,11 @@ static int LORA_SendATCommand(const LORA_ATCommandConfig_t *config)
         lora_status.data_ready = 0;
 
         /* 重启UART接收中断,确保能接收响应 */
+        /* 如果UART接收状态机正在运行,先中止它 */
+        if(huart2.RxState != HAL_UART_STATE_READY)
+        {
+            HAL_UART_AbortReceive(&huart2);
+        }
         HAL_UART_Receive_IT(&huart2, &lora_rx_byte, 1);
 
         /* 发送AT命令 */
@@ -186,13 +192,29 @@ int LORA_Init(uint32_t baudrate)
      * 这里只需要启动接收中断
      */
 
+    /* 清空UART错误标志 */
+    __HAL_UART_CLEAR_OREFLAG(&huart2);
+    __HAL_UART_CLEAR_FEFLAG(&huart2);
+    __HAL_UART_CLEAR_NEFLAG(&huart2);
+    __HAL_UART_CLEAR_IDLEFLAG(&huart2);
+
+    /* 如果UART接收状态机正在运行,先中止它 */
+    if(huart2.RxState != HAL_UART_STATE_READY)
+    {
+        DEBUG_SendString("[LORA] UART RX busy, aborting previous reception...\r\n");
+        HAL_UART_AbortReceive(&huart2);
+        HAL_Delay(50);  /* 等待中止完成 */
+    }
+
     /* 启动USART2接收中断（单字节模式） */
     if(HAL_UART_Receive_IT(&huart2, &lora_rx_byte, 1) != HAL_OK)
     {
-        return -1;  // 启动接收失败
+        DEBUG_SendString("[LORA] ERROR: Failed to start UART RX interrupt\r\n");
+        return -1;  /* 启动接收失败 */
     }
 
     /* 等待LoRa模块上电稳定 */
+    DEBUG_SendString("[LORA] Waiting for module power stabilization...\r\n");
     HAL_Delay(500);
 
     /* 定义初始化步骤的AT命令序列 */
@@ -257,11 +279,15 @@ int LORA_Init(uint32_t baudrate)
 
     /* 执行初始化命令序列 */
     uint8_t num_commands = sizeof(init_commands) / sizeof(init_commands[0]);
+    DEBUG_SendString("[LORA] Starting initialization sequence...\r\n");
     for(uint8_t i = 0; i < num_commands; i++)
     {
         if(LORA_SendATCommand(&init_commands[i]) != 0)
         {
             /* 命令执行失败,返回错误 */
+            char fail_msg[64];
+            snprintf(fail_msg, sizeof(fail_msg), "[LORA] ERROR: Step %d failed\r\n", i + 1);
+            DEBUG_SendString(fail_msg);
             return -1;
         }
     }
@@ -326,9 +352,10 @@ int LORA_SendFormattedData(char *data)
         return -1;  // 参数错误
     }
 
-    /* 计算需要的缓冲区大小: 头部3字节 + 数据长度 */
+    /* 计算需要的缓冲区大小: 头部3字节 + 数据长度 + 结束标识 */
     uint16_t data_len = strlen(data);
-    uint16_t total_size = 3 + data_len;
+    uint16_t end_len = strlen(LORA_PACKET_END);
+    uint16_t total_size = 3 + data_len + end_len;
     uint8_t *send_buffer = (uint8_t *)malloc(total_size);
 
     if(send_buffer == NULL)
@@ -344,6 +371,8 @@ int LORA_SendFormattedData(char *data)
 
     /* 复制数据内容 */
     memcpy(&send_buffer[3], data, data_len);
+    /* 添加结束标识 */
+    memcpy(&send_buffer[3 + data_len], LORA_PACKET_END, end_len);
 
     /* 打印调试信息 */
     char debug_msg[LORA_DEBUG_MSG_SIZE];
