@@ -39,11 +39,13 @@
 #include <inttypes.h> // 用于PRIu32等格式化宏
 #include "sht30_soft.h"  // SHT30温湿度传感器驱动（软件I2C版本）
 #include "radar.h"  // 毫米波雷达驱动
+#include "lora.h"  // LoRa通信模块驱动
 
 /* USER CODE BEGIN PV */
 /* 用户代码开始：私有变量 */
 
 UART_HandleTypeDef huart1;  // USART1句柄，用于调试输出（PA9/PA10，115200）
+UART_HandleTypeDef huart2;  // USART2句柄，用于LoRa通信（PA2/PA3，9600/115200）
 UART_HandleTypeDef huart3;  // USART3句柄，用于毫米波雷达通信（PB10/PB11，115200）
 DMA_HandleTypeDef hdma_usart3_rx;  // USART3接收DMA句柄
 
@@ -55,6 +57,7 @@ char g_device_code[9];  // 全局设备码，8位十六进制 + 结束符
 void SystemClock_Config(void);  // 系统时钟配置函数声明
 static void MX_GPIO_Init(void); // GPIO初始化函数声明（静态函数，仅在本文件内可见）
 static void MX_USART1_UART_Init(void); // USART1初始化函数声明（调试串口）
+static void MX_USART2_UART_Init(void); // USART2初始化函数声明（LoRa串口）
 static void MX_USART3_UART_Init(void); // USART3初始化函数声明（雷达串口）
 
 /* USER CODE BEGIN PFP */
@@ -81,6 +84,7 @@ int main(void)
   SystemClock_Config();
   MX_GPIO_Init();              // 初始化GPIO
   MX_USART1_UART_Init();       // 初始化USART1（调试串口）
+  MX_USART2_UART_Init();       // 初始化USART2（LoRa串口）
   MX_USART3_UART_Init();       // 初始化USART3（雷达串口）
   SHT30_Soft_Init();  // 初始化软件I2C
   HAL_Delay(10);
@@ -91,13 +95,39 @@ int main(void)
     DEBUG_SendString("[ERR] Radar init failed\r\n");
   }
 
-  /* 生成设备码（基于芯片唯一ID） */
+  /* 初始化LoRa模块（USART2，波特率9600） */
+  DEBUG_SendString("[LORA] Initializing...\r\n");
+  DEBUG_SendString("[LORA] Step 1: Sending +++ command (waiting for 'Entry AT')...\r\n");
+
+  /* 生成设备码（基于芯片唯一ID）- 必须在发送之前生成 */
   Generate_Device_Code(g_device_code);
   char device_msg[64];
   /* 拼接字符串 */
   snprintf(device_msg, sizeof(device_msg), "Device Code: %s\r\n", g_device_code);
   /* 发送到串口调试 */
   DEBUG_SendString(device_msg);
+
+  if(LORA_Init(9600) != 0)
+  {
+    DEBUG_SendString("[ERR] LoRa init failed\r\n");
+  }
+  else
+  {
+    DEBUG_SendString("[LORA] LoRa initialized successfully\r\n");
+
+    /* LoRa初始化成功后，发送设备ID "setting" + 设备码 */
+    char device_id_data[32];
+    snprintf(device_id_data, sizeof(device_id_data), "setting%s", g_device_code);
+
+    if(LORA_SendFormattedData(device_id_data) == 0)
+    {
+      DEBUG_SendString("[LORA] Device ID sent successfully\r\n");
+    }
+    else
+    {
+      DEBUG_SendString("[LORA] Failed to send device ID\r\n");
+    }
+  }
 
   /* 打开继电器 */
   RELAY_On();
@@ -116,6 +146,121 @@ int main(void)
   {
     /* 处理雷达数据 */
     RADAR_Process();
+
+    /* 检查LoRa是否接收到数据 */
+    if(LORA_IsDataReady())
+    {
+      uint8_t lora_rx_data[256];
+      uint16_t lora_rx_len = LORA_GetData(lora_rx_data, sizeof(lora_rx_data));
+
+      if(lora_rx_len > 0)
+      {
+        char debug_msg[512];
+
+        /* 打印设备ID用于调试 */
+        snprintf(debug_msg, sizeof(debug_msg),
+                 "[LORA] My Device ID: %s\r\n", g_device_code);
+        DEBUG_SendString(debug_msg);
+
+        /* 使用ASCII字符串格式解析函数 */
+        char payload[256];
+        int payload_len = LORA_ParseStringPacket(
+                            lora_rx_data, lora_rx_len,
+                            g_device_code, payload, sizeof(payload));
+
+        if(payload_len > 0)
+        {
+          /* 成功提取到负载内容 */
+          char debug_msg[512];
+          snprintf(debug_msg, sizeof(debug_msg),
+                   "[LORA RX] Command received: %s\r\n", payload);
+          DEBUG_SendString(debug_msg);
+
+          /* 处理setting命令: settingMACCHANNEL */
+          if(strncmp(payload, "setting", 7) == 0)
+          {
+            /* 提取setting后面的参数 */
+            char *params = &payload[7];  /* 跳过"setting" */
+            uint16_t params_len = strlen(params);
+
+            snprintf(debug_msg, sizeof(debug_msg),
+                     "[LORA] Params length: %d, Params content: %s\r\n",
+                     params_len, params);
+            DEBUG_SendString(debug_msg);
+
+            DEBUG_SendString("[LORA] Processing configuration command\r\n");
+
+            /* 解析MAC和CHANNEL (格式: MAC4字符+CHANNEL2字符) */
+            if(params_len >= 6)  /* 至少需要4字符MAC+2字符CHANNEL */
+            {
+              /* 前面4个字符是MAC,后面2个字符是CHANNEL */
+              char mac[5];
+              char channel[3];
+
+              /* 提取MAC (4个字符) */
+              memcpy(mac, params, 4);
+              mac[4] = '\0';
+
+              /* 提取CHANNEL (2个字符) */
+              memcpy(channel, &params[4], 2);
+              channel[2] = '\0';
+
+              /* 打印解析结果 */
+              snprintf(debug_msg, sizeof(debug_msg),
+                       "[LORA] MAC: %s, CHANNEL: %s\r\n", mac, channel);
+              DEBUG_SendString(debug_msg);
+
+              /* 调用LoRa MAC和CHANNEL配置函数 */
+              if(LORA_ConfigureMacAndChannel(mac, channel) == 0)
+              {
+                DEBUG_SendString("[LORA] MAC and CHANNEL configured successfully\r\n");
+
+                /* 配置成功后发送确认消息: ok+MAC+CHANNEL+设备码 (6a6a4a前缀由发送函数自动添加) */
+                char confirm_msg[32];
+                snprintf(confirm_msg, sizeof(confirm_msg), "ok%s%s%s", mac, channel, g_device_code);
+
+                if(LORA_SendFormattedData(confirm_msg) == 0)
+                {
+                  DEBUG_SendString("[LORA] Configuration confirmation sent successfully\r\n");
+                }
+                else
+                {
+                  DEBUG_SendString("[LORA] ERROR: Failed to send configuration confirmation\r\n");
+                }
+              }
+              else
+              {
+                DEBUG_SendString("[LORA] ERROR: Failed to configure MAC and CHANNEL\r\n");
+              }
+            }
+            else
+            {
+              DEBUG_SendString("[LORA] ERROR: Invalid params format (need MAC+CHANNEL)\r\n");
+            }
+          }
+          /* 处理继电器命令 */
+          else if(strncmp(payload, "ON", 2) == 0)
+          {
+            RELAY_On();
+            DEBUG_SendString("[RELAY] Turned ON via LoRa\r\n");
+          }
+          else if(strncmp(payload, "OFF", 3) == 0)
+          {
+            RELAY_Off();
+            DEBUG_SendString("[RELAY] Turned OFF via LoRa\r\n");
+          }
+          else
+          {
+            DEBUG_SendString("[LORA] Unknown command\r\n");
+          }
+        }
+        else
+        {
+          /* 解析失败或不是发给本设备的数据 */
+          DEBUG_SendString("[LORA RX] Packet ignored (invalid or not for this device)\r\n");
+        }
+      }
+    }
 
     /* 每500ms处理并输出一次传感器状态 */
     if(HAL_GetTick() - last_sensor_output_time >= sensor_output_interval)
@@ -237,6 +382,55 @@ static void MX_USART1_UART_Init(void)
   /* USER CODE BEGIN USART1_Init 2 */
   /* 用户代码开始：USART1初始化第2区 */
   /* USER CODE END USART1_Init 2 */
+}
+
+/**
+  * @brief USART2 Initialization Function USART2初始化函数
+  * @param None 无参数
+  * @retval None 无返回值
+  * @details 配置USART2串口参数：
+  *          - 波特率：9600（LoRa模块默认波特率）
+  *          - 数据位：8位
+  *          - 停止位：1位
+  *          - 校验位：无
+  *          - 流控：无
+  *          - 模式：收发模式
+  *          - 引脚：TX=PA2, RX=PA3
+  * @note USART2挂载在APB1总线上，时钟频率为8MHz
+  *       用于LoRa通信模块
+  */
+static void MX_USART2_UART_Init(void)
+{
+  /* USER CODE BEGIN USART2_Init 0 */
+  /* 用户代码开始：USART2初始化第0区 */
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+  /* 用户代码开始：USART2初始化第1区 */
+  /* USER CODE END USART2_Init 1 */
+
+  /* 配置USART2句柄参数 */
+  huart2.Instance = USART2;                      // USART2实例
+  huart2.Init.BaudRate = 9600;                   // 波特率：9600（LoRa默认）
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;   // 数据位：8位
+  huart2.Init.StopBits = UART_STOPBITS_1;        // 停止位：1位
+  huart2.Init.Parity = UART_PARITY_NONE;         // 校验位：无
+  huart2.Init.Mode = UART_MODE_TX_RX;            // 模式：收发模式
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;   // 硬件流控：无
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16; // 过采样：16倍
+
+  /* 应用USART2配置 */
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();  // 如果初始化失败，调用错误处理函数
+  }
+
+  /* 使能USART2空闲中断（用于检测数据帧结束） */
+  __HAL_UART_ENABLE_IT(&huart2, UART_IT_IDLE);
+
+  /* USER CODE BEGIN USART2_Init 2 */
+  /* 用户代码开始：USART2初始化第2区 */
+  /* USER CODE END USART2_Init 2 */
 }
 
 /**

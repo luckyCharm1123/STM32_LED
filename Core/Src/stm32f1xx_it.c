@@ -57,6 +57,7 @@
 
 /* External variables --------------------------------------------------------*/
 extern UART_HandleTypeDef huart1;  // USART1句柄声明
+extern UART_HandleTypeDef huart2;  // USART2句柄声明
 extern UART_HandleTypeDef huart3;  // USART3句柄声明
 extern DMA_HandleTypeDef hdma_usart3_rx;  // USART3 RX DMA句柄声明
 
@@ -280,6 +281,34 @@ void SysTick_Handler(void)
 /******************************************************************************/
 
 /* USER CODE BEGIN 1 */
+
+/**
+  * @brief This function handles USART2 global interrupt.
+  */
+void USART2_IRQHandler(void)
+{
+  /* USER CODE BEGIN USART2_IRQn 0 */
+
+  /* USER CODE END USART2_IRQn 0 */
+
+  /* 检查是否有空闲中断 */
+  if(__HAL_UART_GET_FLAG(&huart2, UART_FLAG_IDLE) != RESET)
+  {
+    /* 清除空闲中断标志 */
+    __HAL_UART_CLEAR_IDLEFLAG(&huart2);
+
+    /* 调用LoRa空闲中断回调 */
+    extern void LORA_UART_IdleCallback(UART_HandleTypeDef *huart);
+    LORA_UART_IdleCallback(&huart2);
+  }
+
+  /* 调用HAL库的UART中断处理函数（处理接收中断） */
+  HAL_UART_IRQHandler(&huart2);
+
+  /* USER CODE BEGIN USART2_IRQn 1 */
+
+  /* USER CODE END USART2_IRQn 1 */
+}
 
 /**
   * @brief This function handles USART3 global interrupt.

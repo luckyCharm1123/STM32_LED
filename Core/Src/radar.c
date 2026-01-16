@@ -271,16 +271,16 @@ static void Radar_Parse_Frame(uint8_t *data, uint16_t len)
             Radar.target_info.valid_count++;
 
             /* 调试输出：打印解析后的数值和累加状态 */
-            char accum_msg[256];
-            snprintf(accum_msg, sizeof(accum_msg),
-                     "[RADAR] R=%d P=%d | sum_R=%" PRIu32 " sum_P=%" PRIu32 " count=%d\r\n",
-                     Radar.target_info.range_cm,
-                     Radar.target_info.power,
-                     Radar.target_info.range_sum,
-                     Radar.target_info.power_sum,
-                     Radar.target_info.valid_count);
-            extern void DEBUG_SendString(const char *str);
-            DEBUG_SendString(accum_msg);
+            // char accum_msg[256];
+            // snprintf(accum_msg, sizeof(accum_msg),
+            //          "[RADAR] R=%d P=%d | sum_R=%" PRIu32 " sum_P=%" PRIu32 " count=%d\r\n",
+            //          Radar.target_info.range_cm,
+            //          Radar.target_info.power,
+            //          Radar.target_info.range_sum,
+            //          Radar.target_info.power_sum,
+            //          Radar.target_info.valid_count);
+            // extern void DEBUG_SendString(const char *str);
+            // DEBUG_SendString(accum_msg);
 
             /* 检查信号强度 */
             if (Radar.target_info.power >= RADAR_POWER_THRESHOLD)
