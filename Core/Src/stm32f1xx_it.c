@@ -56,7 +56,7 @@
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
-extern UART_HandleTypeDef huart2;  // USART2句柄声明
+extern UART_HandleTypeDef huart1;  // USART1句柄声明
 extern UART_HandleTypeDef huart3;  // USART3句柄声明
 extern DMA_HandleTypeDef hdma_usart3_rx;  // USART3 RX DMA句柄声明
 
@@ -280,40 +280,6 @@ void SysTick_Handler(void)
 /******************************************************************************/
 
 /* USER CODE BEGIN 1 */
-
-/**
-  * @brief This function handles USART2 global interrupt.
-  */
-void USART2_IRQHandler(void)
-{
-  /* USER CODE BEGIN USART2_IRQn 0 */
-  extern char RxData[512];  // ESP接收缓冲区
-  extern uint16_t DataPointer;  // ESP接收数据指针
-
-  /* 检查接收中断标志 */
-  if(__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE) != RESET)
-  {
-    /* 读取接收到的数据 */
-    uint8_t rx_data = (uint8_t)(huart2.Instance->DR & 0xFF);
-
-    /* 存储到ESP接收缓冲区 */
-    if(DataPointer < 512)
-    {
-      RxData[DataPointer++] = rx_data;
-    }
-
-    /* 清除接收中断标志 */
-    __HAL_UART_CLEAR_FLAG(&huart2, UART_FLAG_RXNE);
-  }
-  /* USER CODE END USART2_IRQn 0 */
-
-  /* 调用HAL库的UART中断处理函数 */
-  HAL_UART_IRQHandler(&huart2);
-
-  /* USER CODE BEGIN USART2_IRQn 1 */
-
-  /* USER CODE END USART2_IRQn 1 */
-}
 
 /**
   * @brief This function handles USART3 global interrupt.
