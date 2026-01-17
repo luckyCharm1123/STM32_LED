@@ -44,6 +44,9 @@
 /* USER CODE BEGIN PV */
 /* 用户代码开始：私有变量 */
 
+#define PR_CACHE_VALID_MS 30000U
+#define PR_NO_ACCUM_TIMEOUT_MS 10000U
+
 UART_HandleTypeDef huart1;  // USART1句柄，用于调试输出（PA9/PA10，115200）
 UART_HandleTypeDef huart2;  // USART2句柄，用于LoRa通信（PA2/PA3，9600/115200）
 UART_HandleTypeDef huart3;  // USART3句柄，用于毫米波雷达通信（PB10/PB11，115200）
@@ -67,6 +70,11 @@ typedef struct
 } StateSender_t;
 
 static StateSender_t g_state_sender = {0};
+static uint32_t g_last_p_avg = 0;
+static uint32_t g_last_r_avg = 0;
+static uint8_t g_last_pr_valid = 0;
+static uint32_t g_last_pr_update_time = 0;
+static uint32_t g_pr_no_accum_start_time = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -712,8 +720,15 @@ uint8_t Process_Sensor_Status(uint8_t *last_combined_state)
     /* 确保继电器打开 */
     RELAY_On();
 
-    /* 有人触发：重置为快速发送模式（10次，5s） */
+    /* 有人触发：重置发送状态机并立即发送一次 */
+    if(!g_state_sender.initialized)
+    {
+      StateSender_Init();
+    }
+    g_state_sender.send_state = 0;
     StateSender_ResetFastMode();
+    (void)StateSender_SendFast();
+    g_state_sender.last_send_time = HAL_GetTick();
 
     DEBUG_SendString("[SENSOR] Person detected\r\n");
   }
@@ -724,6 +739,45 @@ uint8_t Process_Sensor_Status(uint8_t *last_combined_state)
 
   /* 更新上次的雷达状态 */
   *last_combined_state = radar_has_person;
+
+  /* 有人但P/R长期未累积，清空并重启接收 */
+  if(radar_has_person == 1 && Radar.target_info.valid_count == 0)
+  {
+    if(g_pr_no_accum_start_time == 0)
+    {
+      g_pr_no_accum_start_time = HAL_GetTick();
+    }
+    else if((HAL_GetTick() - g_pr_no_accum_start_time) >= PR_NO_ACCUM_TIMEOUT_MS)
+    {
+      DEBUG_SendString("[RADAR] P/R no accumulation for 10s, reset RX\r\n");
+
+      /* 清空累积与计数 */
+      RADAR_ClearAccumulatedData();
+      Radar.accum_len = 0;
+      Radar.frame_ready = 0;
+      Radar.old_pos = 0;
+      Radar.accum_last_rx_time = HAL_GetTick();
+      Radar.target_info.low_power_frames = 0;
+      Radar.target_info.high_power_frames = 0;
+
+      /* 重新启动DMA空闲接收 */
+      (void)HAL_UART_AbortReceive(&huart3);
+      if(HAL_UARTEx_ReceiveToIdle_DMA(&huart3, Radar.rx_buffer, sizeof(Radar.rx_buffer)) != HAL_OK)
+      {
+        Radar.state = RADAR_STATE_ERROR;
+      }
+      else
+      {
+        Radar.state = RADAR_STATE_OK;
+      }
+
+      g_pr_no_accum_start_time = 0;
+    }
+  }
+  else
+  {
+    g_pr_no_accum_start_time = 0;
+  }
 
   return radar_has_person;
 }
@@ -818,6 +872,29 @@ int StateSender_SendFast(void)
   {
     p_avg = p_sum / valid_count;
     r_avg = r_sum / valid_count;
+    g_last_p_avg = p_avg;
+    g_last_r_avg = r_avg;
+    g_last_pr_valid = 1;
+    g_last_pr_update_time = HAL_GetTick();
+  }
+  else if(s_val == 1 && valid_count == 0)
+  {
+    uint16_t last_power = Radar.target_info.power;
+    uint16_t last_range = Radar.target_info.range_cm;
+    if(last_power > 0 && last_range > 0)
+    {
+      p_avg = last_power;
+      r_avg = last_range;
+      g_last_p_avg = p_avg;
+      g_last_r_avg = r_avg;
+      g_last_pr_valid = 1;
+      g_last_pr_update_time = HAL_GetTick();
+    }
+    else if(g_last_pr_valid && (HAL_GetTick() - g_last_pr_update_time) <= PR_CACHE_VALID_MS)
+    {
+      p_avg = g_last_p_avg;
+      r_avg = g_last_r_avg;
+    }
   }
 
   char payload[64];
@@ -861,6 +938,29 @@ int StateSender_SendNormal(void)
   {
     p_avg = p_sum / valid_count;
     r_avg = r_sum / valid_count;
+    g_last_p_avg = p_avg;
+    g_last_r_avg = r_avg;
+    g_last_pr_valid = 1;
+    g_last_pr_update_time = HAL_GetTick();
+  }
+  else if(s_val == 1 && valid_count == 0)
+  {
+    uint16_t last_power = Radar.target_info.power;
+    uint16_t last_range = Radar.target_info.range_cm;
+    if(last_power > 0 && last_range > 0)
+    {
+      p_avg = last_power;
+      r_avg = last_range;
+      g_last_p_avg = p_avg;
+      g_last_r_avg = r_avg;
+      g_last_pr_valid = 1;
+      g_last_pr_update_time = HAL_GetTick();
+    }
+    else if(g_last_pr_valid && (HAL_GetTick() - g_last_pr_update_time) <= PR_CACHE_VALID_MS)
+    {
+      p_avg = g_last_p_avg;
+      r_avg = g_last_r_avg;
+    }
   }
 
   /* 温湿度保留2位小数，*100发送为整数（如 22.34 -> 2234） */
