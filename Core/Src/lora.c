@@ -419,6 +419,8 @@ uint16_t LORA_GetData(uint8_t *buffer, uint16_t max_length)
     /* 清除数据就绪标志 */
     lora_status.data_ready = 0;
     lora_status.state = LORA_STATE_IDLE;
+    /* 重置接收长度，避免后续接收追加到旧帧 */
+    lora_status.rx_length = 0;
 
     return copy_length;
 }

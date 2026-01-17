@@ -93,6 +93,7 @@ uint32_t StateSender_GetRadarPowerSum(void);            // 获取P值总值
 uint32_t StateSender_GetRadarRangeSum(void);            // 获取R值总值
 uint16_t StateSender_GetRadarValidCount(void);          // 获取有效次数
 int StateSender_GetTempHumi(float *temp, float *humi);  // 获取温湿度
+static void StrToUpper(char *str);         // 字符串转大写(就地)
 /**
   * @brief USART1发送调试信息
   * @param str: 要发送的调试字符串，以'\0'结尾
@@ -103,6 +104,27 @@ int StateSender_GetTempHumi(float *temp, float *humi);  // 获取温湿度
 void DEBUG_SendString(const char *str)
 {
   HAL_UART_Transmit(&huart1, (uint8_t*)str, strlen(str), HAL_MAX_DELAY);
+}
+
+/**
+  * @brief 字符串转大写(就地)
+  * @param str: 待转换字符串
+  * @retval None
+  */
+static void StrToUpper(char *str)
+{
+  if(str == NULL)
+  {
+    return;
+  }
+  while(*str)
+  {
+    if(*str >= 'a' && *str <= 'z')
+    {
+      *str = (char)(*str - ('a' - 'A'));
+    }
+    str++;
+  }
 }
 
 int main(void)
@@ -243,8 +265,14 @@ int main(void)
                        "[LORA RX] Command received: %s\r\n", payload);
               DEBUG_SendString(debug_msg);
 
+              /* 为命令比较生成大写副本，兼容RELAYOn/RELAYOff等混合大小写 */
+              char payload_upper[256];
+              strncpy(payload_upper, payload, sizeof(payload_upper) - 1);
+              payload_upper[sizeof(payload_upper) - 1] = '\0';
+              StrToUpper(payload_upper);
+
               /* 处理setting命令: settingMACCHANNEL */
-              if(strncmp(payload, "setting", 7) == 0)
+              if(strncmp(payload_upper, "SETTING", 7) == 0)
               {
                 /* 提取setting后面的参数 */
                 char *params = &payload[7];  /* 跳过"setting" */
@@ -315,12 +343,13 @@ int main(void)
                 }
               }
               /* 处理继电器命令 */
-              else if(strncmp(payload, "ON", 2) == 0)
+              else if(strcmp(payload_upper, "ON") == 0 ||
+                      strcmp(payload_upper, "RELAYON") == 0)
               {
                 RELAY_On();
                 DEBUG_SendString("[RELAY] Turned ON via LoRa\r\n");
               }
-              else if(strncmp(payload, "getData", 7) == 0)
+              else if(strcmp(payload_upper, "GETDATA") == 0)
               {
                 /* 同一批次只处理一次getData */
                 if(!getdata_handled)
@@ -330,7 +359,8 @@ int main(void)
                   getdata_handled = 1;
                 }
               }
-              else if(strncmp(payload, "OFF", 3) == 0)
+              else if(strcmp(payload_upper, "OFF") == 0 ||
+                      strcmp(payload_upper, "RELAYOFF") == 0)
               {
                 RELAY_Off();
                 DEBUG_SendString("[RELAY] Turned OFF via LoRa\r\n");
