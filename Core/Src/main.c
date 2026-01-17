@@ -745,6 +745,22 @@ uint8_t Process_Sensor_Status(uint8_t *last_combined_state)
     /* 有人触发：重置为快速发送模式（10次，5s） */
     StateSender_ResetFastMode();
 
+    /* 立即发送一次快速状态 */
+    if(g_state_sender.initialized)
+    {
+      int send_ret = StateSender_SendFast();
+      g_state_sender.last_send_time = HAL_GetTick();
+      if(send_ret == 0 && g_state_sender.fast_remaining > 0)
+      {
+        g_state_sender.fast_remaining--;
+        if(g_state_sender.fast_remaining == 0)
+        {
+          g_state_sender.interval_ms = 15000;  /* 正常发送间隔 15s */
+          DEBUG_SendString("[STATE] Switch to normal mode (15s)\r\n");
+        }
+      }
+    }
+
     DEBUG_SendString("[SENSOR] Person detected\r\n");
   }
   else if(radar_has_person == 0 && *last_combined_state == 1)
