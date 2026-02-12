@@ -40,6 +40,7 @@
 #include "sht30_soft.h"  // SHT30温湿度传感器驱动（软件I2C版本）
 #include "radar.h"  // 毫米波雷达驱动
 #include "lora.h"  // LoRa通信模块驱动
+#include "sound_sensor.h"  // 声音传感器驱动（ADC模拟输出）
 
 /* USER CODE BEGIN PV */
 /* 用户代码开始：私有变量 */
@@ -93,6 +94,7 @@ uint32_t StateSender_GetRadarPowerSum(void);            // 获取P值总值
 uint32_t StateSender_GetRadarRangeSum(void);            // 获取R值总值
 uint16_t StateSender_GetRadarValidCount(void);          // 获取有效次数
 int StateSender_GetTempHumi(float *temp, float *humi);  // 获取温湿度
+uint16_t StateSender_GetSoundLevel(void);               // 获取声音等级
 static void StrToUpper(char *str);         // 字符串转大写(就地)
 /**
   * @brief USART1发送调试信息
@@ -135,7 +137,8 @@ int main(void)
   MX_USART1_UART_Init();       // 初始化USART1（调试串口）
   MX_USART2_UART_Init();       // 初始化USART2（LoRa串口）
   MX_USART3_UART_Init();       // 初始化USART3（雷达串口）
-  SHT30_Soft_Init();  // 初始化软件I2C
+  SHT30_Soft_Init();            // 初始化软件I2C
+  SOUND_SENSOR_Init();          // 初始化声音传感器ADC
   HAL_Delay(10);
 
   /* 初始化雷达模块 */
@@ -885,13 +888,32 @@ int StateSender_SendFast(void)
 /**
   * @brief 正常发送函数
   * @retval 0: 成功, -1: 失败
-  * @details 发送格式: dev_设备码humi_湿度值temp_温度值P_平均P值R_平均R值S_状态
+  * @details 发送格式: dev_设备码humi_湿度值temp_温度值sound_声音值P_平均P值R_平均R值S_状态
   */
 int StateSender_SendNormal(void)
 {
   float temp = 0.0f;
   float humi = 0.0f;
   (void)StateSender_GetTempHumi(&temp, &humi);
+
+  /* 读取声音原始ADC值 */
+  uint16_t sound_raw = SOUND_SENSOR_ReadRaw();
+
+  /* 计算电压值（毫伏，避免浮点数格式化问题） */
+  uint16_t sound_mv = (sound_raw == 0xFFFF) ? 0 : (uint16_t)(sound_raw * 3300UL / 4095UL);
+
+  /* 输出声音传感器详细诊断信息 */
+  char sound_debug[128];
+  if(sound_raw == 0xFFFF)
+  {
+    snprintf(sound_debug, sizeof(sound_debug), "[SOUND] ERROR: Read failed\r\n");
+  }
+  else
+  {
+    snprintf(sound_debug, sizeof(sound_debug), "[SOUND] ADC:%u, Volt:%u.%03uV\r\n",
+             sound_raw, sound_mv / 1000, sound_mv % 1000);
+  }
+  DEBUG_SendString(sound_debug);
 
   /* 雷达状态：缓冲/有人=1，无人=0 */
   Radar_TargetStatus_t status = StateSender_GetRadarStatus();
@@ -913,10 +935,11 @@ int StateSender_SendNormal(void)
   int32_t humi100 = (int32_t)(humi * 100.0f + (humi >= 0 ? 0.5f : -0.5f));
   int32_t temp100 = (int32_t)(temp * 100.0f + (temp >= 0 ? 0.5f : -0.5f));
 
-  char payload[96];
-  snprintf(payload, sizeof(payload), "dev_%shumi_%ldtemp_%ldP_%luR_%luS_%u",
+  char payload[128];
+  snprintf(payload, sizeof(payload), "dev_%shumi_%ldtemp_%ldsound_%uP_%luR_%luS_%u",
            g_device_code,
            (long)humi100, (long)temp100,
+           sound_raw,
            (unsigned long)p_avg, (unsigned long)r_avg, s_val);
 
   if(LORA_SendFormattedData(payload) == 0)
@@ -982,6 +1005,16 @@ int StateSender_GetTempHumi(float *temp, float *humi)
   }
 
   return (SHT30_Soft_Read(temp, humi) == 0) ? 0 : -1;
+}
+
+/**
+  * @brief 获取声音等级
+  * @retval 声音等级(0-100)，255表示失败
+  * @details 读取声音传感器的声音强度等级
+  */
+uint16_t StateSender_GetSoundLevel(void)
+{
+  return SOUND_SENSOR_GetLevel();
 }
 
 /**
