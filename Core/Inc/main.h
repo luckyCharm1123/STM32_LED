@@ -31,7 +31,7 @@ extern "C" {
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "RED_LED.h"
 /* USER CODE END Includes */
 
 /* Exported types ------------------------------------------------------------*/
@@ -58,6 +58,10 @@ void RELAY_On(void);                /* 打开继电器 */
 void RELAY_Off(void);               /* 关闭继电器 */
 void RELAY_Toggle(void);            /* 切换继电器状态 */
 uint8_t RELAY_GetState(void);       /* 获取继电器状态 */
+void GREEN_LED_On(void);            /* 打开绿色LED */
+void GREEN_LED_Off(void);           /* 关闭绿色LED */
+void GREEN_LED_Toggle(void);        /* 切换绿色LED状态 */
+uint8_t GREEN_LED_GetState(void);   /* 获取绿色LED状态 */
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
@@ -66,6 +70,9 @@ uint8_t RELAY_GetState(void);       /* 获取继电器状态 */
 /* 可以在此处添加自定义的常量和宏定义 */
 #define RELAY_Pin GPIO_PIN_8
 #define RELAY_GPIO_Port GPIOA
+
+#define GREEN_LED_Pin GPIO_PIN_0
+#define GREEN_LED_GPIO_Port GPIOA
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus
