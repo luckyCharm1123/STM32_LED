@@ -213,7 +213,7 @@ static int LORA_SendATCommand(const LORA_ATCommandConfig_t *config)
     char error_msg[256];
     snprintf(error_msg, sizeof(error_msg),
              "[LORA] ERROR: Command failed after %d retries\r\n", max_retries);
-    DEBUG_SendString(error_msg);
+    // DEBUG_SendString(error_msg);
     return -1;
 }
 
@@ -255,7 +255,7 @@ int LORA_Init(uint32_t baudrate)
     /* 启动USART2接收中断（单字节模式） */
     if(HAL_UART_Receive_IT(&huart2, &lora_rx_byte, 1) != HAL_OK)
     {
-        DEBUG_SendString("[LORA] ERROR: Failed to start UART RX interrupt\r\n");
+        // DEBUG_SendString("[LORA] ERROR: Failed to start UART RX interrupt\r\n");
         return -1;  /* 启动接收失败 */
     }
 
@@ -366,7 +366,7 @@ int LORA_Init(uint32_t baudrate)
             /* 命令执行失败,返回错误 */
             char fail_msg[64];
             snprintf(fail_msg, sizeof(fail_msg), "[LORA] ERROR: Step %d failed\r\n", i + 1);
-            DEBUG_SendString(fail_msg);
+            // DEBUG_SendString(fail_msg);
             return -1;
         }
     }
@@ -442,7 +442,7 @@ int LORA_SendFormattedData(char *data)
 
     if(send_buffer == NULL)
     {
-        DEBUG_SendString("[LORA] ERROR: Memory allocation failed\r\n");
+        // DEBUG_SendString("[LORA] ERROR: Memory allocation failed\r\n");
         return -1;  // 内存分配失败
     }
 
