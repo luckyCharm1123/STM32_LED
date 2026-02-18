@@ -803,8 +803,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;   /* 低速即可 */
   HAL_GPIO_Init(RELAY_GPIO_Port, &GPIO_InitStruct);
 
-  /* 初始化继电器为关闭状态(低电平触发模块,高电平=关闭) */
-  HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_SET);
+  /* 初始化继电器为吸合状态（PA8低电平=吸合，NC断开，负载断电） */
+  HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_RESET);
 
   /* 配置红色LED指示灯引脚 (PA1) */
   GPIO_InitStruct.Pin = RED_LED_Pin;
@@ -834,9 +834,9 @@ static void MX_GPIO_Init(void)
 /* 可以在此处定义自定义函数 */
 
 /**
-  * @brief 打开继电器
+  * @brief 打开继电器（吸合）
   * @retval None
-  * @details 将PA8引脚设置为低电平，继电器吸合(低电平触发)
+  * @details 将PA8引脚设置为低电平，继电器吸合，NC断开，负载断电
   */
 void RELAY_On(void)
 {
@@ -844,9 +844,9 @@ void RELAY_On(void)
 }
 
 /**
-  * @brief 关闭继电器
+  * @brief 关闭继电器（断开）
   * @retval None
-  * @details 将PA8引脚设置为高电平，继电器断开(低电平触发)
+  * @details 将PA8引脚设置为高电平，继电器断开，NC导通，负载通电
   */
 void RELAY_Off(void)
 {
@@ -968,14 +968,15 @@ uint8_t Process_Sensor_Status(uint8_t *last_combined_state)
 
     if(radar_has_person == 1)
     {
-      /* 检测到人：打开继电器 */
-      RELAY_On();
-      // DEBUG_SendString("[SENSOR] State changed: NOBODY -> PERSON\r\n");
+      /* 检测到人：断开继电器（NC导通，负载通电） */
+      RELAY_Off();
+      // DEBUG_SendString("[SENSOR] State changed: NOBODY -> PERSON, Relay OFF (NC connected)\r\n");
     }
     else
     {
-      /* 无人：只切换模式，不关闭继电器 */
-      // DEBUG_SendString("[SENSOR] State changed: PERSON -> NOBODY\r\n");
+      /* 无人：吸合继电器（NC断开，负载断电） */
+      RELAY_On();
+      // DEBUG_SendString("[SENSOR] State changed: PERSON -> NOBODY, Relay ON (NC disconnected)\r\n");
     }
 
     /* 立即发送一次快速状态 */
