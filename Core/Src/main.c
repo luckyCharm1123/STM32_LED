@@ -43,6 +43,7 @@
 #include "sound_sensor.h"  // 声音传感器驱动（ADC模拟输出）
 #include "veml7700_soft.h"  // VEML7700环境光传感器驱动（软件I2C版本）
 #include "RED_LED.h"  // 红色LED驱动（带呼吸灯效果）
+#include "GREEN_LED.h"  // 绿色LED驱动（配置成功指示）
 
 /* USER CODE BEGIN PV */
 /* 用户代码开始：私有变量 */
@@ -451,8 +452,11 @@ int main(void)
                       g_system_initialized = 1;
                     }
 
-                    /* 停止LED呼吸灯，表示配置成功 */
+                    /* 停止红色LED呼吸灯，表示配置成功 */
                     RED_LED_Breathing_Stop();
+
+                    /* 点亮绿色LED，表示系统配置成功 */
+                    GREEN_LED_On();
 
                     /* 注意：状态发送机已在系统启动时初始化，这里无需再次初始化 */
 
@@ -496,6 +500,15 @@ int main(void)
                 {
                   g_getdata_miss_count = 0;
                   // DEBUG_SendString("[LORA] getData received, miss counter reset\r\n");
+
+                  /* 绿色LED闪烁一下（熄灭->延时->点亮） */
+                  if(GREEN_LED_GetState())
+                  {
+                    GREEN_LED_Off();
+                    HAL_Delay(50);  /* 熄灭50ms */
+                    GREEN_LED_On(); /* 恢复点亮 */
+                  }
+
                   getdata_handled = 1;
                 }
               }
