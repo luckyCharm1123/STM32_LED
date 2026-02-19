@@ -303,7 +303,7 @@ int main(void)
   const uint32_t sensor_output_interval = 500;  // 500ms输出一次
 
   /* 雷达状态变量 */
-  static uint8_t last_radar_has_person = 0;  // 上次雷达状态（0=无人，1=有人）
+  static uint8_t last_radar_has_person = 1;  // 上次雷达状态（0=无人，1=有人），默认有人
 
   while (1)
   {
@@ -446,8 +446,8 @@ int main(void)
 
                     if(!g_system_initialized)
                     {
-                      RELAY_On();
-                      // DEBUG_SendString("[RELAY] Relay turned ON\r\n");
+                      RELAY_On();  /* 继电器吸合，NO导通，负载通电（默认有人状态） */
+                      // DEBUG_SendString("[RELAY] Relay turned ON (NO connected, load powered)\r\n");
                       // DEBUG_SendString("[SYSTEM] Initialization Successful\r\n\r\n");
                       g_system_initialized = 1;
                     }
@@ -551,12 +551,22 @@ int main(void)
       StateSender_Update();
     }
 
-    /* 连续3次未收到getData，重启LoRa并重新配置 */
+    /* 连续3次未收到getData，退出发送模式并重初始化LoRa */
     if(g_lora_configured && g_getdata_miss_count >= 3)
     {
-      // DEBUG_SendString("[LORA] getData timeout x3, reinitializing...\r\n");
+      // DEBUG_SendString("[LORA] getData timeout x3, exit send mode and reinit...\r\n");
+
+      /* 退出数据发送模式 */
+      g_lora_configured = 0;
       LORA_ReinitAndConfig();
       g_getdata_miss_count = 0;
+
+      /* 指示状态：绿灯灭，红灯呼吸 */
+      GREEN_LED_Off();
+      RED_LED_Breathing_Init();
+
+      /* 重初始化后立即请求服务器重新下发配置 */
+      (void)Send_Config_Request();
     }
 
     /* 短暂延时，避免CPU空转 */
@@ -803,7 +813,7 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;   /* 低速即可 */
   HAL_GPIO_Init(RELAY_GPIO_Port, &GPIO_InitStruct);
 
-  /* 初始化继电器为吸合状态（PA8低电平=吸合，NC断开，负载断电） */
+  /* 初始化继电器为吸合状态（PA8低电平=吸合，NO导通，负载通电，默认有人） */
   HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_RESET);
 
   /* 配置红色LED指示灯引脚 (PA1) */
@@ -836,7 +846,7 @@ static void MX_GPIO_Init(void)
 /**
   * @brief 打开继电器（吸合）
   * @retval None
-  * @details 将PA8引脚设置为低电平，继电器吸合，NC断开，负载断电
+  * @details 将PA8引脚设置为低电平，继电器吸合，NO导通，负载通电
   */
 void RELAY_On(void)
 {
@@ -846,7 +856,7 @@ void RELAY_On(void)
 /**
   * @brief 关闭继电器（断开）
   * @retval None
-  * @details 将PA8引脚设置为高电平，继电器断开，NC导通，负载通电
+  * @details 将PA8引脚设置为高电平，继电器断开，NO断开，负载断电
   */
 void RELAY_Off(void)
 {
@@ -968,15 +978,15 @@ uint8_t Process_Sensor_Status(uint8_t *last_combined_state)
 
     if(radar_has_person == 1)
     {
-      /* 检测到人：断开继电器（NC导通，负载通电） */
-      RELAY_Off();
-      // DEBUG_SendString("[SENSOR] State changed: NOBODY -> PERSON, Relay OFF (NC connected)\r\n");
+      /* 检测到人：吸合继电器（NO导通，负载通电） */
+      RELAY_On();
+      // DEBUG_SendString("[SENSOR] State changed: NOBODY -> PERSON, Relay ON (NO connected)\r\n");
     }
     else
     {
-      /* 无人：吸合继电器（NC断开，负载断电） */
-      RELAY_On();
-      // DEBUG_SendString("[SENSOR] State changed: PERSON -> NOBODY, Relay ON (NC disconnected)\r\n");
+      /* 无人：断开继电器（NO断开，负载断电）- 已禁用 */
+      // RELAY_Off();
+      // DEBUG_SendString("[SENSOR] State changed: PERSON -> NOBODY, Relay OFF (NO disconnected)\r\n");
     }
 
     /* 立即发送一次快速状态 */
