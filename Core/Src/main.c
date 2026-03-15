@@ -102,6 +102,7 @@ int StateSender_GetTempHumi(float *temp, float *humi);  // 获取温湿度
 uint16_t StateSender_GetSoundLevel(void);               // 获取声音等级
 static void StrToUpper(char *str);         // 字符串转大写(就地)
 static void LIGHT_I2C_ScanOnBoot(void);     // 启动时扫描I2C地址
+static void StateSender_ReportRelayActionOnce(void);    // 继电器动作后立即上报一次
 /**
   * @brief USART1发送调试信息
   * @param str: 要发送的调试字符串，以'\0'结尾
@@ -133,6 +134,21 @@ static void StrToUpper(char *str)
     }
     str++;
   }
+}
+
+/**
+  * @brief 继电器动作后立即上报一次快速状态
+  * @retval None
+  */
+static void StateSender_ReportRelayActionOnce(void)
+{
+  if(!g_lora_configured || !g_state_sender.initialized)
+  {
+    return;
+  }
+
+  (void)StateSender_SendFast();
+  g_state_sender.last_send_time = HAL_GetTick();
 }
 
 /**
@@ -490,6 +506,7 @@ int main(void)
                 if(g_lora_configured)
                 {
                   RELAY_On();
+                  StateSender_ReportRelayActionOnce();
                   // DEBUG_SendString("[RELAY] Turned ON via LoRa\r\n");
                 }
               }
@@ -518,6 +535,7 @@ int main(void)
                 if(g_lora_configured)
                 {
                   RELAY_Off();
+                  StateSender_ReportRelayActionOnce();
                   // DEBUG_SendString("[RELAY] Turned OFF via LoRa\r\n");
                 }
               }
@@ -1116,12 +1134,16 @@ int StateSender_SendFast(void)
     r_avg = r_sum / valid_count;
   }
 
+  /* 获取继电器状态 */
+  uint8_t relay_state = RELAY_GetState();
+
   char payload[64];
-  snprintf(payload, sizeof(payload), "dev_%sP_%luR_%luS_%u",
+  snprintf(payload, sizeof(payload), "dev_%sP_%luR_%luS_%uRELAY_%u",
            g_device_code,
            (unsigned long)p_avg,
            (unsigned long)r_avg,
-           s_val);
+           s_val,
+           relay_state);
 
   if(LORA_SendFormattedData(payload) == 0)
   {
@@ -1244,12 +1266,16 @@ int StateSender_SendNormal(void)
   int32_t humi100 = (int32_t)(humi * 100.0f + (humi >= 0 ? 0.5f : -0.5f));
   int32_t temp100 = (int32_t)(temp * 100.0f + (temp >= 0 ? 0.5f : -0.5f));
 
+  /* 获取继电器状态 */
+  uint8_t relay_state = RELAY_GetState();
+
   char payload[128];
-  snprintf(payload, sizeof(payload), "dev_%shumi_%ldtemp_%ldsound_%ulight_%ldP_%luR_%luS_%u",
+  snprintf(payload, sizeof(payload), "dev_%shumi_%ldtemp_%ldsound_%ulight_%ldP_%luR_%luS_%uRELAY_%u",
            g_device_code,
            (long)humi100, (long)temp100,
            sound_raw, (long)lux10,
-           (unsigned long)p_avg, (unsigned long)r_avg, s_val);
+           (unsigned long)p_avg, (unsigned long)r_avg, s_val,
+           relay_state);
 
   if(LORA_SendFormattedData(payload) == 0)
   {

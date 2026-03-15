@@ -313,11 +313,11 @@ int LORA_Init(uint32_t baudrate)
             .step_name = "[LORA] Step 6: Setting transfer mode to MODE=1...\r\n"
         },
         {
-            .command = "AT+LEVEL1\r\n",
+            .command = "AT+LEVEL0\r\n",
             .delay_ms = LORA_AT_RESPONSE_DELAY_NORMAL,
-            .expected_response = "+LEVEL=1",
+            .expected_response = "+LEVEL=0",
             .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Step 7: Setting signal level to LEVEL=1...\r\n"
+            .step_name = "[LORA] Step 7: Setting signal level to LEVEL=0...\r\n"
         },
         {
             .command = "AT+MACff,ff\r\n",
