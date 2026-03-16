@@ -61,6 +61,8 @@ static uint8_t g_lora_configured = 0;
 static uint8_t g_system_initialized = 0; // 是否已完成业务初始化（配置后）
 static uint8_t g_getdata_miss_count = 0; // 连续未收到getData的次数
 static uint32_t g_last_config_request_time = 0;  // 上次发送配置请求的时间
+static uint32_t g_config_retry_interval_ms = 5000;  // 配置请求重试间隔（退避）
+static uint32_t g_config_retry_jitter_ms = 0;  // 配置请求抖动，避免固定相位冲突
 
 /* 状态发送机结构体 */
 typedef struct
@@ -103,6 +105,8 @@ uint16_t StateSender_GetSoundLevel(void);               // 获取声音等级
 static void StrToUpper(char *str);         // 字符串转大写(就地)
 static void LIGHT_I2C_ScanOnBoot(void);     // 启动时扫描I2C地址
 static void StateSender_ReportRelayActionOnce(void);    // 继电器动作后立即上报一次
+static void LORA_RearmRxIT(void);                       // 重启LoRa串口接收中断（带容错）
+static uint32_t LORA_NextConfigRetryJitterMs(void);     // 生成配置重试抖动
 /**
   * @brief USART1发送调试信息
   * @param str: 要发送的调试字符串，以'\0'结尾
@@ -164,10 +168,57 @@ static int Send_Config_Request(void)
   if(LORA_SendFormattedData(device_id_data) == 0)
   {
     g_last_config_request_time = HAL_GetTick();
+    g_config_retry_jitter_ms = LORA_NextConfigRetryJitterMs();
     return 0;
   }
 
   return -1;
+}
+
+/**
+  * @brief 生成配置请求重试抖动（单位ms）
+  * @retval 抖动值（200~1199ms）
+  */
+static uint32_t LORA_NextConfigRetryJitterMs(void)
+{
+  uint32_t seed = HAL_GetTick();
+  for(uint8_t i = 0; i < 8 && g_device_code[i] != '\0'; i++)
+  {
+    seed = (seed * 33u) ^ (uint8_t)g_device_code[i];
+  }
+  seed = seed * 1664525u + 1013904223u;
+  return 200u + (seed % 1000u);
+}
+
+/**
+  * @brief 重启LoRa串口接收中断（带容错）
+  * @retval None
+  */
+static void LORA_RearmRxIT(void)
+{
+  extern uint8_t lora_rx_byte;
+
+  HAL_StatusTypeDef st = HAL_UART_Receive_IT(&huart2, &lora_rx_byte, 1);
+  if(st == HAL_OK || st == HAL_BUSY)
+  {
+    return;
+  }
+
+  __HAL_UART_CLEAR_OREFLAG(&huart2);
+  __HAL_UART_CLEAR_FEFLAG(&huart2);
+  __HAL_UART_CLEAR_NEFLAG(&huart2);
+  __HAL_UART_CLEAR_PEFLAG(&huart2);
+  (void)HAL_UART_AbortReceive(&huart2);
+
+  for(uint8_t i = 0; i < 2; i++)
+  {
+    HAL_Delay(1);
+    st = HAL_UART_Receive_IT(&huart2, &lora_rx_byte, 1);
+    if(st == HAL_OK || st == HAL_BUSY)
+    {
+      return;
+    }
+  }
 }
 
 /**
@@ -330,10 +381,21 @@ int main(void)
     if(!g_lora_configured)
     {
       uint32_t now = HAL_GetTick();
-      /* 距离上次请求超过3秒，重新发送 */
-      if((now - g_last_config_request_time) >= 3000)
+      extern LORA_Status_t lora_status;
+      const uint32_t rx_guard_ms = 350;  // 最近收到下行后，短时间内不主动上行
+      /* 距离上次请求超过当前重试间隔，重新发送（指数退避前的线性退避） */
+      if((now - g_last_config_request_time) >= (g_config_retry_interval_ms + g_config_retry_jitter_ms))
       {
-        Send_Config_Request();
+        if(!LORA_IsDataReady() && (now - lora_status.last_rx_time) >= rx_guard_ms)
+        {
+          if(Send_Config_Request() == 0)
+          {
+            if(g_config_retry_interval_ms < 12000)
+            {
+              g_config_retry_interval_ms += 1000;
+            }
+          }
+        }
       }
     }
 
@@ -347,8 +409,7 @@ int main(void)
       uint16_t lora_rx_len = LORA_GetData(lora_rx_data, sizeof(lora_rx_data));
 
       /* 重启UART接收中断，准备接收下一帧数据 */
-      extern uint8_t lora_rx_byte;
-      HAL_UART_Receive_IT(&huart2, &lora_rx_byte, 1);
+      LORA_RearmRxIT();
 
       if(lora_rx_len > 0)
       {
@@ -418,6 +479,10 @@ int main(void)
               /* 处理setting命令: settingMACCHANNEL */
               if(strncmp(payload_upper, "SETTING", 7) == 0)
               {
+                /* 收到有效下行配置，重置重试间隔 */
+                g_config_retry_interval_ms = 5000;
+                g_config_retry_jitter_ms = 0;
+
                 /* 提取setting后面的参数 */
                 char *params = &payload[7];  /* 跳过"setting" */
                 uint16_t params_len = strlen(params);
@@ -459,6 +524,8 @@ int main(void)
                     memcpy(g_lora_channel, channel, sizeof(g_lora_channel));
                     g_lora_configured = 1;
                     g_getdata_miss_count = 0;
+                    g_config_retry_interval_ms = 5000;
+                    g_config_retry_jitter_ms = 0;
 
                     if(!g_system_initialized)
                     {
@@ -578,6 +645,8 @@ int main(void)
       g_lora_configured = 0;
       LORA_ReinitAndConfig();
       g_getdata_miss_count = 0;
+      g_config_retry_interval_ms = 5000;
+      g_config_retry_jitter_ms = 0;
 
       /* 指示状态：绿灯灭，红灯呼吸 */
       GREEN_LED_Off();
@@ -1488,6 +1557,23 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
         last_err_log_time = now;
       }
     }
+  }
+  else if(huart->Instance == USART2)
+  {
+    extern LORA_Status_t lora_status;
+    extern uint8_t lora_rx_byte;
+
+    __HAL_UART_CLEAR_OREFLAG(huart);
+    __HAL_UART_CLEAR_FEFLAG(huart);
+    __HAL_UART_CLEAR_NEFLAG(huart);
+    __HAL_UART_CLEAR_PEFLAG(huart);
+    __HAL_UART_CLEAR_IDLEFLAG(huart);
+
+    (void)HAL_UART_AbortReceive(huart);
+    lora_status.rx_length = 0;
+    lora_status.data_ready = 0;
+    lora_status.state = LORA_STATE_IDLE;
+    (void)HAL_UART_Receive_IT(&huart2, &lora_rx_byte, 1);
   }
 }
 

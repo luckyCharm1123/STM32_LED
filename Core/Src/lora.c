@@ -776,6 +776,18 @@ void LORA_RxCallback(void)
     //          "[LORA RX IRQ] Received %d bytes\r\n", lora_status.rx_length);
     // DEBUG_SendString(debug_msg);
 
+    /* 空闲中断可能在无有效字节时触发，直接忽略 */
+    if(lora_status.rx_length == 0)
+    {
+        return;
+    }
+
+    /* 若上一帧尚未处理，保持现状避免被空帧覆盖 */
+    if(lora_status.data_ready)
+    {
+        return;
+    }
+
     /* 更新最后接收时间 */
     lora_status.last_rx_time = HAL_GetTick();
 
@@ -827,11 +839,27 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
             /* 存储接收到的字节 */
             lora_status.rx_buffer[lora_status.rx_length++] = lora_rx_byte;
             lora_status.state = LORA_STATE_RECEIVING;
+
+            /* 兼容无IDLE场景：缓冲接近满时提前交给主循环处理 */
+            if(lora_status.rx_length >= (LORA_RX_BUFFER_SIZE - 4))
+            {
+                lora_status.last_rx_time = HAL_GetTick();
+                lora_status.data_ready = 1;
+                lora_status.state = LORA_STATE_DATA_READY;
+                return;
+            }
         }
-        /* 缓冲区满，丢弃数据 */
+        else
+        {
+            /* 缓冲区满，停止继续接收，等待主循环取走 */
+            lora_status.last_rx_time = HAL_GetTick();
+            lora_status.data_ready = 1;
+            lora_status.state = LORA_STATE_DATA_READY;
+            return;
+        }
 
         /* 继续接收下一个字节 */
-        HAL_UART_Receive_IT(&huart2, &lora_rx_byte, 1);
+        (void)HAL_UART_Receive_IT(&huart2, &lora_rx_byte, 1);
     }
 }
 
@@ -886,44 +914,59 @@ int LORA_ParseStringPacket(uint8_t *rx_data, uint16_t rx_length,
     //          rx_length, rx_length, rx_data);
     // DEBUG_SendString(debug_msg);
 
+    /* 复制为可安全搜索的字符串（确保以'\0'结尾） */
+    char rx_copy[LORA_RX_BUFFER_SIZE + 1];
+    uint16_t safe_len = (rx_length < LORA_RX_BUFFER_SIZE) ? rx_length : LORA_RX_BUFFER_SIZE;
+    memcpy(rx_copy, rx_data, safe_len);
+    rx_copy[safe_len] = '\0';
+
     /* 获取设备ID长度 */
     uint16_t device_id_len = strlen(device_id);
-
-    /* 检查接收数据长度是否至少包含设备ID */
-    if(rx_length < device_id_len)
+    if(device_id_len == 0 || safe_len < device_id_len)
     {
-        // DEBUG_SendString("[LORA] RX data too short to contain device ID\r\n");
         return -1;
     }
 
-    /* 检查接收数据是否以设备ID开头 */
-    if(strncmp((char *)rx_data, device_id, device_id_len) != 0)
+    /* 兼容前导信息：在整行中查找设备ID（忽略大小写） */
+    char *id_pos = strcasestr(rx_copy, device_id);
+    if(id_pos == NULL)
     {
-        // DEBUG_SendString("[LORA] Device ID mismatch\r\n");
         return -1;
     }
 
-    /* 计算负载长度 */
-    uint16_t payload_len = rx_length - device_id_len;
+    /* 负载从设备ID后开始 */
+    char *payload_start = id_pos + device_id_len;
 
-    /* 检查输出缓冲区是否足够 */
-    if(payload_len >= buffer_size)
+    /* 跳过常见分隔符，兼容“ID:CMD”“ID,CMD”“ID=CMD”等格式 */
+    while(*payload_start == ':' || *payload_start == ',' ||
+          *payload_start == '=' || *payload_start == ' ' ||
+          *payload_start == '\t')
     {
-        // DEBUG_SendString("[LORA] Output buffer too small\r\n");
+        payload_start++;
+    }
+
+    /* 找到有效负载结束位置（行结束） */
+    char *payload_end = payload_start;
+    while(*payload_end != '\0' && *payload_end != '\r' && *payload_end != '\n')
+    {
+        payload_end++;
+    }
+
+    /* 去除尾部空白 */
+    while(payload_end > payload_start &&
+          (payload_end[-1] == ' ' || payload_end[-1] == '\t'))
+    {
+        payload_end--;
+    }
+
+    uint16_t payload_len = (uint16_t)(payload_end - payload_start);
+    if(payload_len == 0 || payload_len >= buffer_size)
+    {
         return -1;
     }
 
-    /* 提取设备ID后面的内容 */
-    memcpy(output_buffer, &rx_data[device_id_len], payload_len);
+    memcpy(output_buffer, payload_start, payload_len);
     output_buffer[payload_len] = '\0';
-
-    /* 去除尾部的回车换行符 */
-    while(payload_len > 0 &&
-          (output_buffer[payload_len - 1] == '\r' ||
-           output_buffer[payload_len - 1] == '\n'))
-    {
-        output_buffer[--payload_len] = '\0';
-    }
 
     /* 打印提取的负载 */
     // snprintf(debug_msg, sizeof(debug_msg),
