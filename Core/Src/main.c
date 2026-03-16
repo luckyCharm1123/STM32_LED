@@ -60,6 +60,8 @@ static char g_lora_channel[3] = {0};  // 保存配置后的CHANNEL(2字符)
 static uint8_t g_lora_configured = 0;
 static uint8_t g_system_initialized = 0; // 是否已完成业务初始化（配置后）
 static uint8_t g_getdata_miss_count = 0; // 连续未收到getData的次数
+static uint8_t g_waiting_getdata_ack = 0;  // 是否在等待本次上报对应的getData应答
+static uint32_t g_last_uplink_time = 0;    // 最近一次上报成功时间
 static uint32_t g_last_config_request_time = 0;  // 上次发送配置请求的时间
 static uint32_t g_config_retry_interval_ms = 5000;  // 配置请求重试间隔（退避）
 static uint32_t g_config_retry_jitter_ms = 0;  // 配置请求抖动，避免固定相位冲突
@@ -524,6 +526,7 @@ int main(void)
                     memcpy(g_lora_channel, channel, sizeof(g_lora_channel));
                     g_lora_configured = 1;
                     g_getdata_miss_count = 0;
+                    g_waiting_getdata_ack = 0;
                     g_config_retry_interval_ms = 5000;
                     g_config_retry_jitter_ms = 0;
 
@@ -583,6 +586,7 @@ int main(void)
                 if(!getdata_handled)
                 {
                   g_getdata_miss_count = 0;
+                  g_waiting_getdata_ack = 0;
                   // DEBUG_SendString("[LORA] getData received, miss counter reset\r\n");
 
                   /* 绿色LED闪烁一下（熄灭->延时->点亮） */
@@ -636,15 +640,29 @@ int main(void)
       StateSender_Update();
     }
 
+    /* 上报后若在窗口期内未收到getData，则记为一次超时 */
+    if(g_lora_configured && g_waiting_getdata_ack)
+    {
+      const uint32_t getdata_timeout_ms = 7000;
+      if((HAL_GetTick() - g_last_uplink_time) >= getdata_timeout_ms)
+      {
+        g_getdata_miss_count++;
+        g_waiting_getdata_ack = 0;
+      }
+    }
+
     /* 连续3次未收到getData，退出发送模式并重初始化LoRa */
     if(g_lora_configured && g_getdata_miss_count >= 3)
     {
       // DEBUG_SendString("[LORA] getData timeout x3, exit send mode and reinit...\r\n");
 
-      /* 退出数据发送模式 */
-      g_lora_configured = 0;
+      /* 先尝试按当前MAC/信道重建LoRa链路 */
       LORA_ReinitAndConfig();
+
+      /* 若仍未恢复，则退出发送模式并请求重新配置 */
+      g_lora_configured = 0;
       g_getdata_miss_count = 0;
+      g_waiting_getdata_ack = 0;
       g_config_retry_interval_ms = 5000;
       g_config_retry_jitter_ms = 0;
 
@@ -1218,7 +1236,8 @@ int StateSender_SendFast(void)
   {
     /* 发送完成后重置毫米波雷达累积值 */
     RADAR_ClearAccumulatedData();
-    g_getdata_miss_count++;
+    g_last_uplink_time = HAL_GetTick();
+    g_waiting_getdata_ack = 1;
     // DEBUG_SendString("[STATE] Fast status sent\r\n");
     return 0;
   }
@@ -1350,7 +1369,8 @@ int StateSender_SendNormal(void)
   {
     /* 发送完成后重置毫米波雷达累积值 */
     RADAR_ClearAccumulatedData();
-    g_getdata_miss_count++;
+    g_last_uplink_time = HAL_GetTick();
+    g_waiting_getdata_ack = 1;
     // DEBUG_SendString("[STATE] Normal status sent\r\n");
     return 0;
   }
@@ -1453,7 +1473,7 @@ void LORA_ReinitAndConfig(void)
     return;
   }
 
-  if(g_lora_configured)
+  if(g_lora_mac[0] != '\0' && g_lora_channel[0] != '\0')
   {
     if(LORA_ConfigureMacAndChannel(g_lora_mac, g_lora_channel) == 0)
     {
