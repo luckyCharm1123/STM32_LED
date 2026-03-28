@@ -27,8 +27,8 @@ static void VEML7700_IIC_Write_Byte(uint8_t data);
 static uint8_t VEML7700_IIC_Read_Byte(uint8_t ack);
 
 /* 私有变量 */
-static uint16_t g_current_gain = VEML7700_ALS_GAIN_1_8;
-static uint16_t g_current_itime = VEML7700_ALS_IT_100MS;
+static uint16_t g_current_gain = VEML7700_ALS_GAIN_1;
+static uint16_t g_current_itime = VEML7700_ALS_IT_200MS;
 
 /* 参考Adafruit实现：按当前增益与积分时间计算分辨率 */
 static float VEML7700_GetGainValue(void)
@@ -67,7 +67,7 @@ static float VEML7700_GetResolution(void)
 
   if(gain_value <= 0.0f || it_ms <= 0)
   {
-    return 0.0288f;  /* 回退到 IT=100ms, Gain=2 的分辨率 */
+    return 0.0288f;  /* 回退到 IT=200ms, Gain=1 的分辨率 */
   }
 
   return MAX_RES * (IT_MAX / (float)it_ms) * (GAIN_MAX / gain_value);
@@ -377,11 +377,11 @@ int8_t VEML7700_Soft_Init(void)
   }
   HAL_Delay(10);
 
-  /* 配置并使能VEML7700: 增益2x, 积分时间800ms, shutdown=0(使能) */
-  /* 使用高增益+长积分提高弱光可读性 */
+  /* 配置并使能VEML7700: 增益1x, 积分时间200ms, shutdown=0(使能) */
+  /* 量程目标约1887lux(65535*0.0288)，可覆盖1500lux */
   config = 0;
-  config |= ((VEML7700_ALS_GAIN_2 & 0x03) << 11);
-  config |= ((VEML7700_ALS_IT_800MS & 0x0F) << 6);
+  config |= ((VEML7700_ALS_GAIN_1 & 0x03) << 11);
+  config |= ((VEML7700_ALS_IT_200MS & 0x0F) << 6);
   config &= (uint16_t)(~VEML7700_ALS_SD);
   if(VEML7700_WriteReg(VEML7700_REG_ALS_CONF, config) != 0)
   {
@@ -391,8 +391,8 @@ int8_t VEML7700_Soft_Init(void)
   /* 等待传感器启动 (至少2.5ms, 使用10ms) */
   HAL_Delay(10);
 
-  /* 等待第一次测量完成 (800ms积分时间，留余量) */
-  HAL_Delay(900);
+  /* 等待第一次测量完成 (200ms积分时间，留余量) */
+  HAL_Delay(250);
 
   /* 尝试读取设备ID（可选验证，即使失败也继续） */
   if(VEML7700_ReadReg(VEML7700_REG_INT_ID, &device_id) == 0)
@@ -404,8 +404,8 @@ int8_t VEML7700_Soft_Init(void)
     }
   }
 
-  g_current_gain = VEML7700_ALS_GAIN_2;
-  g_current_itime = VEML7700_ALS_IT_800MS;
+  g_current_gain = VEML7700_ALS_GAIN_1;
+  g_current_itime = VEML7700_ALS_IT_200MS;
 
   return 0;
 }

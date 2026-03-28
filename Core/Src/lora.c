@@ -25,6 +25,11 @@ extern UART_HandleTypeDef huart2;  // USART2句柄
 extern void DEBUG_SendString(const char *str);  // 调试输出函数
 extern void RED_LED_Breathing_Update(void);  // 更新LED呼吸灯
 
+/* 调试输出开关: 在main.c中定义，此处引用 */
+#ifndef LORA_DEBUG_VERBOSE
+#define LORA_DEBUG_VERBOSE 0
+#endif
+
 /* ==================== 全局变量 ==================== */
 
 /**
@@ -126,10 +131,12 @@ static int LORA_SendATCommand(const LORA_ATCommandConfig_t *config)
                            config->max_retries : LORA_AT_MAX_RETRIES;
 
     /* 输出步骤名称 */
-    // if(config->step_name != NULL)
-    // {
-    //     DEBUG_SendString(config->step_name);
-    // }
+    if(config->step_name != NULL)
+    {
+#if LORA_DEBUG_VERBOSE
+        DEBUG_SendString(config->step_name);
+#endif
+    }
 
     /* 重试循环 */
     for(uint8_t retry = 0; retry < max_retries; retry++)
@@ -177,25 +184,33 @@ static int LORA_SendATCommand(const LORA_ATCommandConfig_t *config)
             {
                 if(strcasestr((char *)lora_status.rx_buffer, config->expected_response) != NULL)
                 {
-                    // DEBUG_SendString("[LORA] Command Success: Response matched\r\n");
+#if LORA_DEBUG_VERBOSE
+                    DEBUG_SendString("[LORA] Command Success: Response matched\r\n");
+#endif
                     return 0;  // 成功
                 }
-                // else
-                // {
-                //     DEBUG_SendString("[LORA] Command Failed: Expected response not found\r\n");
-                // }
+                else
+                {
+#if LORA_DEBUG_VERBOSE
+                    DEBUG_SendString("[LORA] Command Failed: Expected response not found\r\n");
+#endif
+                }
             }
             else
             {
                 /* 不检查响应,只要收到数据就认为成功 */
-                // DEBUG_SendString("[LORA] Command Success: Data received\r\n");
+#if LORA_DEBUG_VERBOSE
+                DEBUG_SendString("[LORA] Command Success: Data received\r\n");
+#endif
                 return 0;
             }
         }
-        // else
-        // {
-        //     DEBUG_SendString("[LORA] Command Failed: No data received\r\n");
-        // }
+        else
+        {
+#if LORA_DEBUG_VERBOSE
+            DEBUG_SendString("[LORA] Command Failed: No data received\r\n");
+#endif
+        }
 
         /* 如果不是最后一次重试,继续尝试 */
         if(retry < max_retries - 1)
@@ -210,10 +225,12 @@ static int LORA_SendATCommand(const LORA_ATCommandConfig_t *config)
     }
 
     /* 所有重试都失败 */
+#if LORA_DEBUG_VERBOSE
     char error_msg[256];
     snprintf(error_msg, sizeof(error_msg),
              "[LORA] ERROR: Command failed after %d retries\r\n", max_retries);
-    // DEBUG_SendString(error_msg);
+    DEBUG_SendString(error_msg);
+#endif
     return -1;
 }
 
@@ -285,74 +302,53 @@ int LORA_Init(uint32_t baudrate)
             .step_name = "[LORA] Step 2: Testing communication with AT...\r\n"
         },
         {
-            .command = "AT+DEFAULT\r\n",
-            .delay_ms = LORA_AT_RESPONSE_DELAY_XLONG,
-            .expected_response = "OK",
-            .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Step 3: Resetting module to factory defaults...\r\n"
-        },
-        {
-            .command = "+++\r\n",
-            .delay_ms = LORA_AT_RESPONSE_DELAY_LONG,
-            .expected_response = "Entry AT",
-            .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Step 4: Re-entering AT mode after reset...\r\n"
-        },
-        {
-            .command = "AT\r\n",
-            .delay_ms = LORA_AT_RESPONSE_DELAY_NORMAL,
-            .expected_response = "OK",
-            .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Step 5: Retesting communication after reset...\r\n"
-        },
-        {
             .command = "AT+MODE1\r\n",
             .delay_ms = LORA_AT_RESPONSE_DELAY_NORMAL,
             .expected_response = "+MODE=1",
             .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Step 6: Setting transfer mode to MODE=1...\r\n"
+            .step_name = "[LORA] Step 3: Setting transfer mode to MODE=1...\r\n"
         },
         {
             .command = "AT+LEVEL0\r\n",
             .delay_ms = LORA_AT_RESPONSE_DELAY_NORMAL,
             .expected_response = "+LEVEL=0",
             .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Step 7: Setting signal level to LEVEL=0...\r\n"
+            .step_name = "[LORA] Step 4: Setting signal level to LEVEL=0...\r\n"
         },
         {
             .command = "AT+MACff,ff\r\n",
             .delay_ms = LORA_AT_RESPONSE_DELAY_NORMAL,
             .expected_response = "+MAC=ff,ff",
             .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Step 8: Setting MAC address to ff,ff...\r\n"
+            .step_name = "[LORA] Step 5: Setting MAC address to ff,ff...\r\n"
         },
         {
             .command = "AT+MAC\r\n",
             .delay_ms = LORA_AT_RESPONSE_DELAY_NORMAL,
             .expected_response = "MAC=ff,ff",
             .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Step 9: Verifying MAC address setting...\r\n"
+            .step_name = "[LORA] Step 6: Verifying MAC address...\r\n"
         },
         {
             .command = "AT+CHANNEL00\r\n",
             .delay_ms = LORA_AT_RESPONSE_DELAY_NORMAL,
             .expected_response = "+CHANNEL=00",
             .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Step 10: Setting CHANNEL to 00...\r\n"
+            .step_name = "[LORA] Step 7: Setting CHANNEL to 00...\r\n"
         },
         {
             .command = "AT+CHANNEL\r\n",
             .delay_ms = LORA_AT_RESPONSE_DELAY_NORMAL,
             .expected_response = "CHANNEL=00",
             .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Step 11: Verifying CHANNEL setting...\r\n"
+            .step_name = "[LORA] Step 8: Verifying CHANNEL...\r\n"
         },
         {
             .command = "AT+RESET\r\n",
             .delay_ms = LORA_AT_RESPONSE_DELAY_XLONG,
             .expected_response = "Power on",
             .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Step 12: Resetting module to apply configuration...\r\n"
+            .step_name = "[LORA] Step 9: Resetting module to apply configuration...\r\n"
         }
     };
 
@@ -378,7 +374,9 @@ int LORA_Init(uint32_t baudrate)
     /* 启动UART接收中断，准备接收LoRa数据（AT+RESET后需要重新启动） */
     HAL_UART_Receive_IT(&huart2, &lora_rx_byte, 1);
 
-    // DEBUG_SendString("[LORA] Initialization complete - Ready for communication\r\n");
+#if LORA_DEBUG_VERBOSE
+    DEBUG_SendString("[LORA] Initialization complete - Ready for communication\r\n");
+#endif
     return 0;  // 成功
 }
 

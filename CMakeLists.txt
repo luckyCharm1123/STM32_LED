@@ -48,6 +48,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     "Core/Src/lora.c"
     "Core/Src/veml7700_soft.c"
     "Core/Src/RED_LED.c"
+    "Core/Src/mhz19b_pwm.c"
 )
 
 # Add include paths

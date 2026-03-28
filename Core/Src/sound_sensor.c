@@ -18,6 +18,9 @@
 static ADC_HandleTypeDef hadc1_sound;
 static uint8_t sound_sensor_initialized = 0;
 
+#define SOUND_SENSOR_SAMPLE_COUNT      12u
+#define SOUND_SENSOR_TRIM_COUNT        1u
+
 /**
   * @brief 初始化声音传感器ADC
   * @retval None
@@ -76,6 +79,8 @@ void SOUND_SENSOR_Init(void)
 uint16_t SOUND_SENSOR_ReadRaw(void)
 {
   uint32_t adc_sum = 0;
+  uint16_t adc_min = 0xFFFFu;
+  uint16_t adc_max = 0u;
   uint8_t i;
 
   if(!sound_sensor_initialized)
@@ -83,8 +88,8 @@ uint16_t SOUND_SENSOR_ReadRaw(void)
     return 0xFFFF;  // 未初始化
   }
 
-  /* 多次采样取平均，提高稳定性 */
-  for(i = 0; i < 16; i++)
+  /* 多次采样并去极值平均，抑制偶发毛刺 */
+  for(i = 0; i < SOUND_SENSOR_SAMPLE_COUNT; i++)
   {
     /* 启动ADC转换 */
     if(HAL_ADC_Start(&hadc1_sound) != HAL_OK)
@@ -100,15 +105,29 @@ uint16_t SOUND_SENSOR_ReadRaw(void)
       return 0xFFFF;  // 转换超时
     }
 
-    /* 累加ADC值 */
-    adc_sum += HAL_ADC_GetValue(&hadc1_sound);
+    uint16_t adc_value = (uint16_t)HAL_ADC_GetValue(&hadc1_sound);
+    adc_sum += adc_value;
+    if(adc_value < adc_min)
+    {
+      adc_min = adc_value;
+    }
+    if(adc_value > adc_max)
+    {
+      adc_max = adc_value;
+    }
 
     /* 停止ADC */
     HAL_ADC_Stop(&hadc1_sound);
   }
 
-  /* 返回平均值 */
-  return (uint16_t)(adc_sum / 16);
+  if(SOUND_SENSOR_SAMPLE_COUNT > (2u * SOUND_SENSOR_TRIM_COUNT))
+  {
+    uint32_t trimmed_sum = adc_sum - adc_min - adc_max;
+    uint16_t trimmed_count = SOUND_SENSOR_SAMPLE_COUNT - 2u;
+    return (uint16_t)(trimmed_sum / trimmed_count);
+  }
+
+  return (uint16_t)(adc_sum / SOUND_SENSOR_SAMPLE_COUNT);
 }
 
 /**

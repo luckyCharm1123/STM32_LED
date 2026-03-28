@@ -66,11 +66,11 @@ PA3.GPIO_Speed=GPIO_SPEED_FREQ_LOW  # 速度：低速（2MHz）
 PA3.Locked=true                 # 引脚锁定：是
 PA3.Signal=USART2_RX            # 信号：USART2接收
 
-# PA6 引脚配置（LED - LED控制）
+# PA6 引脚配置（MH-Z19B PWM输入）
 PA6.GPIOParameters=GPIO_Label   # GPIO参数：标签
-PA6.GPIO_Label=LED              # 引脚标签：LED
+PA6.GPIO_Label=MHZ19B_PWM       # 引脚标签：MH-Z19B PWM
 PA6.Locked=true                 # 引脚锁定：是
-PA6.Signal=GPIO_Output          # 信号：GPIO输出模式
+PA6.Signal=GPIO_Input           # 信号：GPIO输入模式
 
 PinOutPanel.RotationAngle=0     # 引脚图旋转角度：0度
 
