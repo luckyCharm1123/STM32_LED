@@ -34,6 +34,7 @@ extern "C" {
 
 #define LORA_RX_BUFFER_SIZE 256  // LoRa接收缓冲区大小
 #define LORA_TIMEOUT_MS         1000  // 接收超时时间（毫秒）
+#define LORA_FORMATTED_PAYLOAD_MAX_LEN 192U  // 格式化发送最大负载长度（ASCII）
 
 /* ==================== 数据结构 ==================== */
 
@@ -61,6 +62,7 @@ typedef struct {
 /* ==================== 全局变量声明 ==================== */
 
 extern LORA_Status_t lora_status;  // LoRa模块状态
+extern uint8_t lora_rx_byte;       // USART2单字节接收缓冲（由lora.c定义）
 
 /* ==================== 函数声明 ==================== */
 
@@ -171,6 +173,14 @@ int LORA_ParseStringPacket(uint8_t *rx_data, uint16_t rx_length,
   *   3. 发送AT+MAC=XX,XX设置MAC
   */
 int LORA_ConfigureMacAndChannel(char *mac_4chars, char *channel);
+
+/**
+  * @brief LoRa等待阶段的协作任务钩子（可选重写）
+  * @retval None
+  * @details LORA_Init/LORA_ConfigureMacAndChannel 等内部等待期间会周期调用。
+  *          用户可在应用层实现此函数，以推进其他非LoRa任务，避免系统“卡死”。
+  */
+void LORA_WaitHook(void);
 
 #ifdef __cplusplus
 }

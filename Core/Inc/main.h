@@ -45,6 +45,33 @@ extern "C" {
 
 /* Exported macro ------------------------------------------------------------*/
 /* USER CODE BEGIN EM */
+#ifndef LORA_DEBUG_VERBOSE
+#define LORA_DEBUG_VERBOSE 0
+#endif
+
+#if LORA_DEBUG_VERBOSE
+#define LORA_DEBUG_LOG(msg) \
+  do { \
+    DEBUG_SendString((msg)); \
+  } while(0)
+
+#define LORA_DEBUG_CODE(code_block) \
+  do { \
+    code_block \
+  } while(0)
+#else
+#define LORA_DEBUG_LOG(msg) \
+  do { \
+    /* Keep argument "used" and preserve type-checking without runtime side effects. */ \
+    if(0) { \
+      DEBUG_SendString((msg)); \
+    } \
+  } while(0)
+
+#define LORA_DEBUG_CODE(code_block) \
+  do { \
+  } while(0)
+#endif
 
 /* USER CODE END EM */
 
@@ -58,10 +85,10 @@ void RELAY_On(void);                /* 打开继电器 */
 void RELAY_Off(void);               /* 关闭继电器 */
 void RELAY_Toggle(void);            /* 切换继电器状态 */
 uint8_t RELAY_GetState(void);       /* 获取继电器状态 */
-void GREEN_LED_On(void);            /* 打开绿色LED */
-void GREEN_LED_Off(void);           /* 关闭绿色LED */
-void GREEN_LED_Toggle(void);        /* 切换绿色LED状态 */
-uint8_t GREEN_LED_GetState(void);   /* 获取绿色LED状态 */
+void RELAY2_On(void);               /* 打开继电器2 */
+void RELAY2_Off(void);              /* 关闭继电器2 */
+void RELAY2_Toggle(void);           /* 切换继电器2状态 */
+uint8_t RELAY2_GetState(void);      /* 获取继电器2状态 */
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
@@ -70,6 +97,8 @@ uint8_t GREEN_LED_GetState(void);   /* 获取绿色LED状态 */
 /* 可以在此处添加自定义的常量和宏定义 */
 #define RELAY_Pin GPIO_PIN_8
 #define RELAY_GPIO_Port GPIOA
+#define RELAY2_Pin GPIO_PIN_5
+#define RELAY2_GPIO_Port GPIOA
 
 #define GREEN_LED_Pin GPIO_PIN_0
 #define GREEN_LED_GPIO_Port GPIOA

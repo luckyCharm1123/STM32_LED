@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "stm32f1xx_hal_uart.h"  // 包含UART HAL库头文件
+#include "mhz19b_pwm.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -291,19 +292,30 @@ void USART2_IRQHandler(void)
 
   /* USER CODE END USART2_IRQn 0 */
 
-  /* 检查是否有空闲中断 */
-  if(__HAL_UART_GET_FLAG(&huart2, UART_FLAG_IDLE) != RESET)
+  /* 先让HAL处理RXNE/ERR等事件，避免IDLE清标志时吞掉最后一个RXNE字节 */
+  HAL_UART_IRQHandler(&huart2);
+
+  /* 再处理IDLE：仅在IDLE中断使能且IDLE标志有效时进入 */
+  if ((__HAL_UART_GET_IT_SOURCE(&huart2, UART_IT_IDLE) != RESET) &&
+      (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_IDLE) != RESET))
   {
-    /* 清除空闲中断标志 */
+    /*
+     * 严格处理顺序：
+     * 1) 若此刻仍有RXNE待处理，先交给HAL搬运数据；
+     * 2) 确认RXNE已清后再清IDLE；
+     * 3) 最后通知上层做“帧结束”判定。
+     */
+    while ((__HAL_UART_GET_IT_SOURCE(&huart2, UART_IT_RXNE) != RESET) &&
+           (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE) != RESET))
+    {
+      HAL_UART_IRQHandler(&huart2);
+    }
+
     __HAL_UART_CLEAR_IDLEFLAG(&huart2);
 
-    /* 调用LoRa空闲中断回调 */
     extern void LORA_UART_IdleCallback(UART_HandleTypeDef *huart);
     LORA_UART_IdleCallback(&huart2);
   }
-
-  /* 调用HAL库的UART中断处理函数（处理接收中断） */
-  HAL_UART_IRQHandler(&huart2);
 
   /* USER CODE BEGIN USART2_IRQn 1 */
 
@@ -342,6 +354,16 @@ void DMA1_Channel3_IRQHandler(void)
   /* USER CODE BEGIN DMA1_Channel3_IRQn 1 */
 
   /* USER CODE END DMA1_Channel3_IRQn 1 */
+}
+
+/**
+  * @brief This function handles EXTI line[9:5] interrupts.
+  */
+void EXTI9_5_IRQHandler(void)
+{
+  /* USER CODE BEGIN EXTI9_5_IRQn 0 */
+  MHZ19B_PWM_EXTI_IRQHandler();
+  /* USER CODE END EXTI9_5_IRQn 0 */
 }
 
 /* USER CODE END 1 */

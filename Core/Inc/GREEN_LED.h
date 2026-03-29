@@ -14,12 +14,7 @@
 #ifndef __GREEN_LED_H
 #define __GREEN_LED_H
 
-#include "stm32f1xx_hal.h"
 #include <stdint.h>
-
-/* GPIO引脚定义 */
-#define GREEN_LED_Pin         GPIO_PIN_0
-#define GREEN_LED_GPIO_Port   GPIOA
 
 /* 基础控制函数 */
 void GREEN_LED_On(void);                /* 打开绿色LED */

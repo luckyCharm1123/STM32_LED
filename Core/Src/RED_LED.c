@@ -151,6 +151,26 @@ void RED_LED_Off(void)
   */
 void RED_LED_Toggle(void)
 {
+  if(g_pwm_hw_inited)
+  {
+    /* PWM接管引脚时，禁止直接操作GPIO，改为切换占空比 */
+    if(g_led_breathing_enabled)
+    {
+      g_led_breathing_enabled = 0;
+    }
+
+    if(TIM2->CCR2 > 0U)
+    {
+      g_pwm_duty = 0U;
+    }
+    else
+    {
+      g_pwm_duty = 100U;
+    }
+    RED_LED_PWM_SetDuty(g_pwm_duty);
+    return;
+  }
+
   HAL_GPIO_TogglePin(RED_LED_GPIO_Port, RED_LED_Pin);
 }
 
@@ -160,6 +180,10 @@ void RED_LED_Toggle(void)
   */
 uint8_t RED_LED_GetState(void)
 {
+  if(g_pwm_hw_inited)
+  {
+    return (TIM2->CCR2 > 0U) ? 1U : 0U;
+  }
   return HAL_GPIO_ReadPin(RED_LED_GPIO_Port, RED_LED_Pin);
 }
 

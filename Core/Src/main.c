@@ -45,6 +45,9 @@
 #include "RED_LED.h"  // 红色LED驱动（带呼吸灯效果）
 #include "GREEN_LED.h"  // 绿色LED驱动（配置成功指示）
 #include "mhz19b_pwm.h"  // MH-Z19B二氧化碳传感器驱动（PWM方式）
+#include "state_sender.h"
+#include "sound_accumulator.h"
+#include "deferred_action.h"
 
 /* USER CODE BEGIN PV */
 /* 用户代码开始：私有变量 */
@@ -53,9 +56,6 @@ UART_HandleTypeDef huart1;  // USART1句柄，用于调试输出（PA9/PA10，11
 UART_HandleTypeDef huart2;  // USART2句柄，用于LoRa通信（PA2/PA3，9600/115200）
 UART_HandleTypeDef huart3;  // USART3句柄，用于毫米波雷达通信（PB10/PB11，115200）
 DMA_HandleTypeDef hdma_usart3_rx;  // USART3接收DMA句柄
-
-/* 调试输出开关: 设为1启用详细调试日志, 0关闭 */
-#define LORA_DEBUG_VERBOSE  0
 
 /* 动态WiFi配置变量 */
 char g_device_code[9];  // 全局设备码，8位十六进制 + 结束符
@@ -69,41 +69,7 @@ static uint32_t g_last_uplink_time = 0;    // 最近一次上报成功时间
 static uint32_t g_last_config_request_time = 0;  // 上次发送配置请求的时间
 static uint32_t g_config_retry_interval_ms = 5000;  // 配置请求重试间隔（退避）
 static uint32_t g_config_retry_jitter_ms = 0;  // 配置请求抖动，避免固定相位冲突
-static uint32_t g_last_downlink_time = 0;  // 最近一次收到LoRa下行时间
-
-/* 声音传感器按秒采样累积（用于上报窗口均值） */
-typedef struct
-{
-  uint32_t sum_raw;           /* 窗口内ADC原始值累加和 */
-  uint32_t sample_count;      /* 窗口内有效样本数 */
-  uint32_t last_sample_tick;  /* 上次采样时间戳(ms) */
-  uint32_t ema_raw_q8;        /* EMA内部状态，Q8定点 */
-  uint16_t last_output_raw;   /* 最后一次输出值（死区保持） */
-  uint8_t ema_initialized;    /* EMA状态是否已初始化 */
-  uint8_t initialized;        /* 是否已初始化时间基准 */
-} SoundAccumulator_t;
-
-static SoundAccumulator_t g_sound_acc = {0};
-static MHZ19B_Co2SM_t g_co2_sm = {0};  /* CO2非阻塞测量状态机 */
-
-#define SOUND_EMA_ALPHA_DEN      2u   /* alpha = 1/2，提升变化响应速度 */
-#define SOUND_DEAD_BAND_RAW      3u   /* 降低死区，提高小幅变化敏感度 */
-#define SOUND_SAMPLE_INTERVAL_MS 200u /* 声音采样间隔，越小越灵敏 */
-#define STATE_SENDER_FAST_INTERVAL_MS   8000u  /* 快速发送间隔，放宽以提升下行接收概率 */
-#define STATE_SENDER_NORMAL_INTERVAL_MS 15000u /* 正常发送间隔 */
-#define LORA_DOWNLINK_GUARD_MS          2500u  /* 收到下行后保留接收窗口，暂缓下一次快速上报 */
-
-/* 状态发送机结构体 */
-typedef struct
-{
-  uint8_t  send_state;       /* 发送状态 */
-  uint32_t last_send_time;   /* 上次发送时间(ms) */
-  uint32_t interval_ms;      /* 当前发送间隔(ms) */
-  uint8_t  fast_remaining;   /* 快速模式剩余次数 */
-  uint8_t  initialized;      /* 是否已初始化 */
-} StateSender_t;
-
-static StateSender_t g_state_sender = {0};
+static uint8_t g_config_request_count = 0;   // 已发送配置请求次数（用于失败后重置LoRa）
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -119,28 +85,17 @@ void DEBUG_SendString(const char *str);    // USART1调试串口发送函数原�
 void Get_STM32_UID(char *uid_str);         // 获取STM32芯片唯一ID
 void Generate_Device_Code(char *device_code);  // 生成8位设备码
 uint8_t Process_Sensor_Status(uint8_t *last_combined_state);  // 处理传感器状态并返回综合状态
-void StateSender_Init(void);               // 初始化状态发送机
-void StateSender_Update(void);             // 状态发送机更新
-int StateSender_SendFast(void);            // 快速发送函数
-int StateSender_SendNormal(void);          // 正常发送函数
-void StateSender_ResetFastMode(void);      // 进入/重置快速发送模式
-void LORA_ReinitAndConfig(void);           // 重新初始化LoRa并配置MAC/CHANNEL
-Radar_TargetStatus_t StateSender_GetRadarStatus(void);  // 获取毫米波雷达状态
-uint32_t StateSender_GetRadarPowerSum(void);            // 获取P值总值
-uint32_t StateSender_GetRadarRangeSum(void);            // 获取R值总值
-uint16_t StateSender_GetRadarValidCount(void);          // 获取有效次数
-int StateSender_GetTempHumi(float *temp, float *humi);  // 获取温湿度
-uint16_t StateSender_GetSoundLevel(void);               // 获取声音等级
+static void LORA_ReinitAndConfig(void);    // 重初始化LoRa并进入未配置重连态
 static void StrToUpper(char *str);         // 字符串转大写(就地)
-static void LIGHT_I2C_ScanOnBoot(void);     // 启动时扫描I2C地址
 static void StateSender_ReportRelayActionOnce(void);    // 继电器动作后立即上报一次
 static void LORA_RearmRxIT(void);                       // 重启LoRa串口接收中断（带容错）
 static uint32_t LORA_NextConfigRetryJitterMs(void);     // 生成配置重试抖动
-static void SoundAccumulator_Init(void);                // 初始化声音采样累积器
-static void SoundAccumulator_Update(void);              // 按固定周期更新一次声音采样
-static uint16_t SoundAccumulator_FilterRaw(uint16_t raw); // 对窗口均值做平滑/抗抖
-static uint16_t SoundAccumulator_GetAverageAndReset(void); // 读取窗口均值并清空窗口
-static void LORA_MarkUplinkAndTrackGetdata(void);       // 记录一次上报并跟踪Getdata应答
+void LORA_MarkUplinkAndTrackGetdata(void);              // 记录一次上报并跟踪Getdata应答
+static void LORA_HandleGetDataAck(uint8_t *batch_guard); // 处理getData应答（同批次仅一次）
+static void LORA_ApplyConfigSuccess(const char *mac, const char *channel);
+static void LORA_ProcessDeferredAction(void);
+static void MainLoop_Idle(void);                        // 主循环空闲等待（事件唤醒）
+void LORA_WaitHook(void);                                // LoRa等待阶段协作任务钩子
 /**
   * @brief USART1发送调试信息
   * @param str: 要发送的调试字符串，以'\0'结尾
@@ -151,6 +106,14 @@ static void LORA_MarkUplinkAndTrackGetdata(void);       // 记录一次上报并
 void DEBUG_SendString(const char *str)
 {
   HAL_UART_Transmit(&huart1, (uint8_t*)str, strlen(str), HAL_MAX_DELAY);
+}
+
+void LORA_WaitHook(void)
+{
+  /* LoRa等待期间推进关键任务，避免系统完全无响应 */
+  SoundAccumulator_Update();
+  StateSender_BackgroundTick();
+  RADAR_Process();
 }
 
 /**
@@ -180,13 +143,12 @@ static void StrToUpper(char *str)
   */
 static void StateSender_ReportRelayActionOnce(void)
 {
-  if(!g_lora_configured || !g_state_sender.initialized)
+  if(!g_lora_configured || !StateSender_IsInitialized())
   {
     return;
   }
 
-  (void)StateSender_SendFast();
-  g_state_sender.last_send_time = HAL_GetTick();
+  (void)StateSender_SendFastImmediate();
 }
 
 /**
@@ -204,16 +166,17 @@ static int Send_Config_Request(void)
 #if LORA_DEBUG_VERBOSE
     char dbg_msg[64];
     snprintf(dbg_msg, sizeof(dbg_msg), "[LORA] Config request sent: %s\r\n", device_id_data);
-    DEBUG_SendString(dbg_msg);
+    LORA_DEBUG_LOG(dbg_msg);
 #endif
 
     g_last_config_request_time = HAL_GetTick();
     g_config_retry_jitter_ms = LORA_NextConfigRetryJitterMs();
+    g_config_request_count++;
     return 0;
   }
 
 #if LORA_DEBUG_VERBOSE
-  DEBUG_SendString("[LORA] Config request send failed\r\n");
+  LORA_DEBUG_LOG("[LORA] Config request send failed\r\n");
 #endif
   return -1;
 }
@@ -233,14 +196,67 @@ static uint32_t LORA_NextConfigRetryJitterMs(void)
   return 200u + (seed % 1000u);
 }
 
+static void LORA_ApplyConfigSuccess(const char *mac, const char *channel)
+{
+  if(mac == NULL || channel == NULL)
+  {
+    return;
+  }
+
+  memcpy(g_lora_mac, mac, sizeof(g_lora_mac));
+  memcpy(g_lora_channel, channel, sizeof(g_lora_channel));
+  g_lora_configured = 1U;
+  DeferredAction_ClearConfigPending();
+  g_getdata_miss_count = 0;
+  g_waiting_getdata_ack = 0;
+  g_config_request_count = 0;
+  g_config_retry_interval_ms = 5000;
+  g_config_retry_jitter_ms = 0;
+
+  if(!g_system_initialized)
+  {
+    RELAY_On();   /* 继电器1断开（高电平），负载通电（默认有人状态） */
+    RELAY2_On();  /* 继电器2断开（高电平），负载通电（默认有人状态） */
+    g_system_initialized = 1;
+  }
+
+  RED_LED_Breathing_Stop();
+  GREEN_LED_On();
+
+  {
+    char confirm_msg[32];
+    snprintf(confirm_msg, sizeof(confirm_msg), "ok%s%s%s", mac, channel, g_device_code);
+    (void)LORA_SendFormattedData(confirm_msg);
+  }
+}
+
+static void LORA_ProcessDeferredAction(void)
+{
+  LORA_DeferredAction_t action;
+
+  if(!DeferredAction_TakeDue(&action))
+  {
+    return;
+  }
+
+  if(action.kind == LORA_DEFERRED_ACTION_SEND_CONFIG_REQUEST)
+  {
+    (void)Send_Config_Request();
+    return;
+  }
+
+  if(action.kind == LORA_DEFERRED_ACTION_APPLY_CONFIG_SUCCESS)
+  {
+    LORA_ApplyConfigSuccess(action.mac, action.channel);
+  }
+}
+
 /**
   * @brief 重启LoRa串口接收中断（带容错）
   * @retval None
   */
 static void LORA_RearmRxIT(void)
 {
-  extern uint8_t lora_rx_byte;
-
   HAL_StatusTypeDef st = HAL_UART_Receive_IT(&huart2, &lora_rx_byte, 1);
   if(st == HAL_OK || st == HAL_BUSY)
   {
@@ -265,124 +281,12 @@ static void LORA_RearmRxIT(void)
 }
 
 /**
-  * @brief 初始化声音采样累积器
-  * @retval None
-  */
-static void SoundAccumulator_Init(void)
-{
-  g_sound_acc.sum_raw = 0;
-  g_sound_acc.sample_count = 0;
-  g_sound_acc.last_sample_tick = HAL_GetTick();
-  g_sound_acc.ema_raw_q8 = 0;
-  g_sound_acc.last_output_raw = 0;
-  g_sound_acc.ema_initialized = 0;
-  g_sound_acc.initialized = 1;
-}
-
-/**
-  * @brief 按固定周期采样声音传感器并累积到窗口
-  * @retval None
-  */
-static void SoundAccumulator_Update(void)
-{
-  if(!g_sound_acc.initialized)
-  {
-    SoundAccumulator_Init();
-    return;
-  }
-
-  uint32_t now = HAL_GetTick();
-  uint32_t elapsed = now - g_sound_acc.last_sample_tick;
-
-  while(elapsed >= SOUND_SAMPLE_INTERVAL_MS)
-  {
-    uint16_t raw = SOUND_SENSOR_ReadRaw();
-    if(raw != 0xFFFFu)
-    {
-      g_sound_acc.sum_raw += raw;
-      g_sound_acc.sample_count++;
-    }
-
-    g_sound_acc.last_sample_tick += SOUND_SAMPLE_INTERVAL_MS;
-    elapsed -= SOUND_SAMPLE_INTERVAL_MS;
-  }
-}
-
-/**
-  * @brief 对窗口均值做EMA平滑和死区抗抖
-  * @param raw: 当前窗口均值
-  * @retval 处理后的稳定值
-  */
-static uint16_t SoundAccumulator_FilterRaw(uint16_t raw)
-{
-  if(!g_sound_acc.ema_initialized)
-  {
-    g_sound_acc.ema_raw_q8 = ((uint32_t)raw << 8);
-    g_sound_acc.last_output_raw = raw;
-    g_sound_acc.ema_initialized = 1;
-    return raw;
-  }
-
-  {
-    int32_t target_q8 = (int32_t)((uint32_t)raw << 8);
-    int32_t current_q8 = (int32_t)g_sound_acc.ema_raw_q8;
-    int32_t delta_q8 = target_q8 - current_q8;
-    current_q8 += (delta_q8 / (int32_t)SOUND_EMA_ALPHA_DEN);
-    g_sound_acc.ema_raw_q8 = (uint32_t)current_q8;
-  }
-
-  {
-    uint16_t ema_raw = (uint16_t)((g_sound_acc.ema_raw_q8 + 128u) >> 8);
-    uint16_t last_raw = g_sound_acc.last_output_raw;
-    uint16_t diff = (ema_raw > last_raw) ? (ema_raw - last_raw) : (last_raw - ema_raw);
-
-    if(diff < SOUND_DEAD_BAND_RAW)
-    {
-      return last_raw;
-    }
-
-    g_sound_acc.last_output_raw = ema_raw;
-    return ema_raw;
-  }
-}
-
-/**
-  * @brief 获取窗口平均声音原始值并清空窗口
-  * @retval 平均ADC原始值(0-4095)
-  */
-static uint16_t SoundAccumulator_GetAverageAndReset(void)
-{
-  uint16_t avg_raw = 0;
-
-  if(g_sound_acc.sample_count > 0)
-  {
-    avg_raw = (uint16_t)((g_sound_acc.sum_raw + (g_sound_acc.sample_count / 2u)) / g_sound_acc.sample_count);
-  }
-  else
-  {
-    uint16_t fallback_raw = SOUND_SENSOR_ReadRaw();
-    if(fallback_raw != 0xFFFFu)
-    {
-      avg_raw = fallback_raw;
-    }
-    else
-    {
-      avg_raw = g_sound_acc.ema_initialized ? g_sound_acc.last_output_raw : 0u;
-    }
-  }
-
-  g_sound_acc.sum_raw = 0;
-  g_sound_acc.sample_count = 0;
-  return SoundAccumulator_FilterRaw(avg_raw);
-}
-
-/**
   * @brief 记录一次上报，并统计Getdata应答缺失次数
   * @retval None
   * @details 如果上一轮上报仍未收到Getdata，且又发起了新一轮上报，
   *          则记为一次“搜索未收到Getdata”。
   */
-static void LORA_MarkUplinkAndTrackGetdata(void)
+void LORA_MarkUplinkAndTrackGetdata(void)
 {
   if(g_waiting_getdata_ack)
   {
@@ -397,48 +301,49 @@ static void LORA_MarkUplinkAndTrackGetdata(void)
 }
 
 /**
-  * @brief 启动时扫描软件I2C总线地址（PB6/PB7）
-  * @note  用于快速确认VEML7700(0x10)是否真实在线
-  * @note  已禁用调用和所有调试输出，避免初始化时红色LED长亮
+  * @brief 处理一次getData应答并清除等待状态
+  * @param batch_guard: 同一批次去重标记指针（传NULL表示不做批次去重）
+  * @retval None
+  * @details LoRa链路中既可能收到裸行"getData"，也可能收到携带设备ID的GETDATA负载；
+  *          两者语义一致，统一收敛到同一ACK处理路径，避免统计口径分叉。
   */
-__attribute__((unused)) static void LIGHT_I2C_ScanOnBoot(void)
+static void LORA_HandleGetDataAck(uint8_t *batch_guard)
 {
-  // char msg[96];  // 已禁用调试输出
-  uint8_t addr;
-  uint8_t found_count = 0;
-  uint8_t found_veml = 0;
-
-  // DEBUG_SendString("[LIGHT SCAN] I2C scan start (7bit 0x08~0x77)\r\n");  // 已禁用
-
-  for(addr = 0x08; addr <= 0x77; addr++)
+  if((batch_guard != NULL) && (*batch_guard != 0U))
   {
-    if(VEML7700_ProbeAddress7bit(addr) == 0)
-    {
-      found_count++;
-      if(addr == 0x10)
-      {
-        found_veml = 1;
-      }
-
-      // snprintf(msg, sizeof(msg), "[LIGHT SCAN] found: 0x%02X\r\n", addr);  // 已禁用
-      // DEBUG_SendString(msg);
-    }
+    return;
   }
 
-  // snprintf(msg, sizeof(msg), "[LIGHT SCAN] total devices: %u\r\n", found_count);  // 已禁用
-  // DEBUG_SendString(msg);
+  g_getdata_miss_count = 0;
+  g_waiting_getdata_ack = 0;
 
-  // if(found_veml)
-  // {
-  //   DEBUG_SendString("[LIGHT SCAN] VEML7700 address 0x10 detected\r\n");  // 已禁用
-  // }
-  // else
-  // {
-  //   DEBUG_SendString("[LIGHT SCAN] WARNING: 0x10 not detected\r\n");  // 已禁用
-  // }
+#if LORA_DEBUG_VERBOSE
+  LORA_DEBUG_LOG("[LORA CMD] GETDATA ack received\r\n");
+#endif
 
-  (void)found_count;  // 避免未使用变量警告
-  (void)found_veml;   // 避免未使用变量警告
+  /* 绿色LED闪烁一下（熄灭->延时->点亮） */
+  if(GREEN_LED_GetState())
+  {
+    GREEN_LED_Off();
+    HAL_Delay(50);  /* 熄灭50ms */
+    GREEN_LED_On(); /* 恢复点亮 */
+  }
+
+  if(batch_guard != NULL)
+  {
+    *batch_guard = 1U;
+  }
+}
+
+/**
+  * @brief 主循环空闲等待
+  * @retval None
+  * @details 使用WFI进入睡眠，等待任意中断（如SysTick/UART）唤醒。
+  *          相比固定HAL_Delay(10)，可显著降低主循环附加响应上限。
+  */
+static void MainLoop_Idle(void)
+{
+  __WFI();
 }
 
 int main(void)
@@ -451,30 +356,30 @@ int main(void)
   MX_USART3_UART_Init();       // 初始化USART3（雷达串口）
   SHT30_Soft_Init();            // 初始化软件I2C
   MHZ19B_PWM_Init();            // 初始化MH-Z19B CO2传感器（PWM方式）
-  MHZ19B_Co2SM_Start(&g_co2_sm);  // 提前启动CO2测量，首次发送时即可有结果
 
-  /* 点亮红色LED，表示I2C扫描和光传感器初始化开始 */
+  /* 点亮红色LED，表示光传感器探测与初始化开始 */
   RED_LED_On();
 
-  // LIGHT_I2C_ScanOnBoot();       // 扫描I2C总线设备
   SOUND_SENSOR_Init();          // 初始化声音传感器ADC
   SoundAccumulator_Init();      // 初始化声音按秒采样累积器
 
   /* 检测VEML7700光传感器 */
   if(VEML7700_IsConnected() == 0)
   {
-    // DEBUG_SendString("[LIGHT] VEML7700 detected on I2C bus\r\n");
+    LORA_DEBUG_LOG("[LIGHT] VEML7700 detected on I2C bus\r\n");
     if(VEML7700_Soft_Init() == 0)
     {
-      // DEBUG_SendString("[LIGHT] VEML7700 initialized successfully\r\n");
+      LORA_DEBUG_LOG("[LIGHT] VEML7700 initialized successfully\r\n");
 
       /* 读取配置寄存器验证 */
       uint16_t config_reg = 0;
       if(VEML7700_ReadReg(0x00, &config_reg) == 0)
       {
-        // char conf_msg[64];
-        // snprintf(conf_msg, sizeof(conf_msg), "[LIGHT] Config Reg: 0x%04X\r\n", config_reg);
-        // DEBUG_SendString(conf_msg);
+        LORA_DEBUG_CODE(
+          char conf_msg[64];
+          snprintf(conf_msg, sizeof(conf_msg), "[LIGHT] Config Reg: 0x%04X\r\n", config_reg);
+          LORA_DEBUG_LOG(conf_msg);
+        );
         (void)config_reg;  // 避免未使用变量警告
       }
 
@@ -482,24 +387,26 @@ int main(void)
       uint16_t als_high = 0, als_low = 0;
       if(VEML7700_ReadReg(0x04, &als_high) == 0 && VEML7700_ReadReg(0x05, &als_low) == 0)
       {
-        // char als_msg[64];
-        // snprintf(als_msg, sizeof(als_msg), "[LIGHT] ALS Raw: 0x%04X 0x%04X\r\n", als_high, als_low);
-        // DEBUG_SendString(als_msg);
+        LORA_DEBUG_CODE(
+          char als_msg[64];
+          snprintf(als_msg, sizeof(als_msg), "[LIGHT] ALS Raw: 0x%04X 0x%04X\r\n", als_high, als_low);
+          LORA_DEBUG_LOG(als_msg);
+        );
         (void)als_high;  // 避免未使用变量警告
         (void)als_low;   // 避免未使用变量警告
       }
     }
-    // else
-    // {
-    //   DEBUG_SendString("[LIGHT] WARNING: VEML7700 init failed\r\n");
-    // }
+    else
+    {
+      LORA_DEBUG_LOG("[LIGHT] WARNING: VEML7700 init failed\r\n");
+    }
   }
-  // else
-  // {
-  //   DEBUG_SendString("[LIGHT] WARNING: VEML7700 not detected (check wiring)\r\n");
-  // }
+  else
+  {
+    LORA_DEBUG_LOG("[LIGHT] WARNING: VEML7700 not detected (check wiring)\r\n");
+  }
 
-  /* 熄灭红色LED，表示I2C扫描和光传感器初始化完成 */
+  /* 熄灭红色LED，表示光传感器探测与初始化完成 */
   RED_LED_Off();
 
   HAL_Delay(10);
@@ -507,31 +414,32 @@ int main(void)
   /* 初始化雷达模块 */
   if(RADAR_Init() != 0)
   {
-    // DEBUG_SendString("[ERR] Radar init failed\r\n");
+    LORA_DEBUG_LOG("[ERR] Radar init failed\r\n");
   }
 
   /* 启动红色LED呼吸灯，表示开始LoRa初始化和配置 */
   RED_LED_Breathing_Init();
 
   /* 初始化LoRa模块（USART2，波特率9600） */
-  // DEBUG_SendString("[LORA] Initializing...\r\n");
-  // DEBUG_SendString("[LORA] Step 1: Sending +++ command (waiting for 'Entry AT')...\r\n");
+  LORA_DEBUG_LOG("[LORA] Initializing...\r\n");
+  LORA_DEBUG_LOG("[LORA] Step 1: Sending +++ command (waiting for 'Entry AT')...\r\n");
 
   /* 生成设备码（基于芯片唯一ID）- 必须在发送之前生成 */
   Generate_Device_Code(g_device_code);
-  char device_msg[64];
-  /* 拼接字符串 */
-  snprintf(device_msg, sizeof(device_msg), "Device Code: %s\r\n", g_device_code);
-  /* 发送到串口调试 */
-  // DEBUG_SendString(device_msg);
+  StateSender_SetDeviceCode(g_device_code);
+  LORA_DEBUG_CODE(
+    char device_msg[64];
+    snprintf(device_msg, sizeof(device_msg), "Device Code: %s\r\n", g_device_code);
+    LORA_DEBUG_LOG(device_msg);
+  );
 
   if(LORA_Init(9600) != 0)
   {
-    // DEBUG_SendString("[ERR] LoRa init failed\r\n");
+    LORA_DEBUG_LOG("[ERR] LoRa init failed\r\n");
   }
   else
   {
-    // DEBUG_SendString("[LORA] LoRa initialized successfully\r\n");
+    LORA_DEBUG_LOG("[LORA] LoRa initialized successfully\r\n");
 
     /* LoRa初始化成功后，立即发送设备ID请求 */
     Send_Config_Request();
@@ -555,16 +463,17 @@ int main(void)
     /* 更新LED呼吸灯效果 */
     RED_LED_Breathing_Update();
     SoundAccumulator_Update();  /* 按采样周期采集声音 */
-    MHZ19B_Co2SM_Update(&g_co2_sm);  /* 推进CO2非阻塞测量 */
+    StateSender_BackgroundTick();  /* 推进状态发送器后台任务（含CO2） */
+    LORA_ProcessDeferredAction();  /* 非阻塞处理LoRa延迟动作 */
 
     /* 如果LoRa未配置，检查是否需要重试发送配置请求 */
     if(!g_lora_configured)
     {
       uint32_t now = HAL_GetTick();
-      extern LORA_Status_t lora_status;
       const uint32_t rx_guard_ms = 350;  // 最近收到下行后，短时间内不主动上行
-      /* 距离上次请求超过当前重试间隔，重新发送（指数退避前的线性退避） */
-      if((now - g_last_config_request_time) >= (g_config_retry_interval_ms + g_config_retry_jitter_ms))
+      /* 配置已下发且等待复位稳定期间，不再触发重试和重置 */
+      if(!DeferredAction_IsConfigPending() &&
+         (now - g_last_config_request_time) >= (g_config_retry_interval_ms + g_config_retry_jitter_ms))
       {
         if(!LORA_IsDataReady() && (now - lora_status.last_rx_time) >= rx_guard_ms)
         {
@@ -576,6 +485,21 @@ int main(void)
             }
           }
         }
+      }
+
+      /* 连续发送3次配置请求仍未完成配置，则重置LoRa模块并重新发起请求 */
+      if(!DeferredAction_IsConfigPending() && g_config_request_count >= 3)
+      {
+        if(LORA_Init(9600) == 0)
+        {
+          LORA_RearmRxIT();
+        }
+
+        g_config_request_count = 0;
+        g_last_config_request_time = HAL_GetTick();
+        g_config_retry_interval_ms = 5000;
+        g_config_retry_jitter_ms = 0;
+        DeferredAction_Schedule(LORA_DEFERRED_ACTION_SEND_CONFIG_REQUEST, 500U, NULL, NULL);
       }
     }
 
@@ -593,12 +517,12 @@ int main(void)
 
       if(lora_rx_len > 0)
       {
-        // char debug_msg[512];
-
-        /* 打印设备ID用于调试 */
-        // snprintf(debug_msg, sizeof(debug_msg),
-        //          "[LORA] My Device ID: %s\r\n", g_device_code);
-        // DEBUG_SendString(debug_msg);
+        LORA_DEBUG_CODE(
+          char debug_msg[64];
+          snprintf(debug_msg, sizeof(debug_msg),
+                   "[LORA] My Device ID: %s\r\n", g_device_code);
+          LORA_DEBUG_LOG(debug_msg);
+        );
 
         /* 按\r\n拆包处理 */
         char rx_str[257];
@@ -611,12 +535,12 @@ int main(void)
         snprintf(lora_raw_dbg, sizeof(lora_raw_dbg),
                  "[LORA RX RAW] len=%u, data=%s\r\n",
                  (unsigned int)copy_len, rx_str);
-        DEBUG_SendString(lora_raw_dbg);
+        LORA_DEBUG_LOG(lora_raw_dbg);
 #endif
 
         char *saveptr = NULL;
         uint8_t getdata_handled = 0;
-        char last_line[256] = {0};
+        char *last_line = NULL;
         char *line = strtok_r(rx_str, "\r\n", &saveptr);
         while(line != NULL)
         {
@@ -626,21 +550,28 @@ int main(void)
             char lora_line_dbg[320];
             snprintf(lora_line_dbg, sizeof(lora_line_dbg),
                      "[LORA RX LINE] %s\r\n", line);
-            DEBUG_SendString(lora_line_dbg);
+            LORA_DEBUG_LOG(lora_line_dbg);
 #endif
-            g_last_downlink_time = HAL_GetTick();
+            StateSender_RecordDownlinkTick(HAL_GetTick());
 
             /* 跳过同一批次重复行 */
-            if(strcmp(line, last_line) == 0)
+            if(last_line != NULL && strcmp(line, last_line) == 0)
             {
               line = strtok_r(NULL, "\r\n", &saveptr);
               continue;
             }
-            strncpy(last_line, line, sizeof(last_line) - 1);
-            last_line[sizeof(last_line) - 1] = '\0';
+            last_line = line;
+
+            /* 裸行getData是链路ACK（无设备ID封装），和payload里的GETDATA语义一致 */
+            if(strcmp(line, "getData") == 0 || strcmp(line, "GETDATA") == 0)
+            {
+              LORA_HandleGetDataAck(&getdata_handled);
+              line = strtok_r(NULL, "\r\n", &saveptr);
+              continue;
+            }
 
             /* 过滤常见无关回显 */
-            if(strcmp(line, "getData") == 0 || strcmp(line, "OK") == 0 || strcmp(line, "Power on") == 0)
+            if(strcmp(line, "OK") == 0 || strcmp(line, "Power on") == 0)
             {
               line = strtok_r(NULL, "\r\n", &saveptr);
               continue;
@@ -665,20 +596,17 @@ int main(void)
               char lora_payload_dbg[320];
               snprintf(lora_payload_dbg, sizeof(lora_payload_dbg),
                        "[LORA RX PAYLOAD] %s\r\n", payload);
-              DEBUG_SendString(lora_payload_dbg);
+              LORA_DEBUG_LOG(lora_payload_dbg);
 #endif
 
-              /* 为命令比较生成大写副本，兼容RELAYOn/RELAYOff等混合大小写 */
-              char payload_upper[256];
-              strncpy(payload_upper, payload, sizeof(payload_upper) - 1);
-              payload_upper[sizeof(payload_upper) - 1] = '\0';
-              StrToUpper(payload_upper);
+              /* 原地转大写，兼容RELAYOn/RELAYOff等混合大小写 */
+              StrToUpper(payload);
 
               /* 处理setting命令: settingMACCHANNEL */
-              if(strncmp(payload_upper, "SETTING", 7) == 0)
+              if(strncmp(payload, "SETTING", 7) == 0)
               {
 #if LORA_DEBUG_VERBOSE
-                DEBUG_SendString("[LORA] Processing configuration command\r\n");
+                LORA_DEBUG_LOG("[LORA] Processing configuration command\r\n");
 #endif
 
                 /* 收到有效下行配置，重置重试间隔 */
@@ -694,7 +622,7 @@ int main(void)
                 snprintf(debug_buf, sizeof(debug_buf),
                          "[LORA] Params length: %d, Params: %.16s\r\n",
                          params_len, params);
-                DEBUG_SendString(debug_buf);
+                LORA_DEBUG_LOG(debug_buf);
 #endif
 
                 /* 解析MAC和CHANNEL (格式: MAC4字符+CHANNEL2字符) */
@@ -716,91 +644,77 @@ int main(void)
                   if(LORA_ConfigureMacAndChannel(mac, channel) == 0)
                   {
 #if LORA_DEBUG_VERBOSE
-                    DEBUG_SendString("[LORA] MAC and CHANNEL configured successfully\r\n");
+                    LORA_DEBUG_LOG("[LORA] MAC and CHANNEL configured successfully\r\n");
 #endif
 
-                    /* 等待LoRa模块重启完成并稳定（AT+RESET后需要时间初始化） */
-                    HAL_Delay(500);
-
-                    /* 保存MAC和CHANNEL，标记已配置 */
-                    memcpy(g_lora_mac, mac, sizeof(g_lora_mac));
-                    memcpy(g_lora_channel, channel, sizeof(g_lora_channel));
-                    g_lora_configured = 1;
-                    g_getdata_miss_count = 0;
-                    g_waiting_getdata_ack = 0;
-                    g_config_retry_interval_ms = 5000;
-                    g_config_retry_jitter_ms = 0;
-
-                    if(!g_system_initialized)
-                    {
-                      RELAY_On();  /* 继电器吸合，NO导通，负载通电（默认有人状态） */
-                      g_system_initialized = 1;
-                    }
-
-                    /* 停止红色LED呼吸灯，表示配置成功 */
-                    RED_LED_Breathing_Stop();
-
-                    /* 点亮绿色LED，表示系统配置成功 */
-                    GREEN_LED_On();
-
-                    /* 配置成功后发送确认消息: ok+MAC+CHANNEL+设备码 */
-                    char confirm_msg[32];
-                    snprintf(confirm_msg, sizeof(confirm_msg), "ok%s%s%s", mac, channel, g_device_code);
-
-                    if(LORA_SendFormattedData(confirm_msg) != 0)
-                    {
-#if LORA_DEBUG_VERBOSE
-                      DEBUG_SendString("[LORA] ERROR: Failed to send configuration confirmation\r\n");
-#endif
-                    }
+                    /* 等待LoRa模块重启稳定后再完成配置收口（非阻塞） */
+                    DeferredAction_Schedule(LORA_DEFERRED_ACTION_APPLY_CONFIG_SUCCESS, 500U, mac, channel);
                   }
                   else
                   {
 #if LORA_DEBUG_VERBOSE
-                    DEBUG_SendString("[LORA] ERROR: Failed to configure MAC and CHANNEL\r\n");
+                    LORA_DEBUG_LOG("[LORA] ERROR: Failed to configure MAC and CHANNEL\r\n");
 #endif
                   }
                 }
                 else
                 {
 #if LORA_DEBUG_VERBOSE
-                  DEBUG_SendString("[LORA] ERROR: Invalid params format (need MAC+CHANNEL)\r\n");
+                  LORA_DEBUG_LOG("[LORA] ERROR: Invalid params format (need MAC+CHANNEL)\r\n");
 #endif
                 }
               }
 
               /* 统一命令匹配：兼容附加字段、前缀动作名、混合格式 */
-              char *cmd = payload_upper;
+              char *cmd = payload;
               while(*cmd == ' ' || *cmd == '\t')
               {
                 cmd++;
               }
 
-              uint8_t is_relay_on_cmd = 0;
-              uint8_t is_relay_off_cmd = 0;
+              uint8_t is_relay1_on_cmd = 0;
+              uint8_t is_relay1_off_cmd = 0;
+              uint8_t is_relay2_on_cmd = 0;
+              uint8_t is_relay2_off_cmd = 0;
 
               if(strcmp(cmd, "ON") == 0 ||
                  strcmp(cmd, "RELAYON") == 0)
               {
-                is_relay_on_cmd = 1;
+                is_relay1_on_cmd = 1;
               }
 
               if(strcmp(cmd, "OFF") == 0 ||
                  strcmp(cmd, "RELAYOFF") == 0)
               {
-                is_relay_off_cmd = 1;
+                is_relay1_off_cmd = 1;
+              }
+
+              if(strcmp(cmd, "ON2") == 0 ||
+                 strcmp(cmd, "RELAY2ON") == 0)
+              {
+                is_relay2_on_cmd = 1;
+              }
+
+              if(strcmp(cmd, "OFF2") == 0 ||
+                 strcmp(cmd, "RELAY2OFF") == 0)
+              {
+                is_relay2_off_cmd = 1;
               }
 
 #if LORA_DEBUG_VERBOSE
               char lora_cmd_dbg[200];
               snprintf(lora_cmd_dbg, sizeof(lora_cmd_dbg),
-                       "[LORA CMD] cmd=%s, on=%u, off=%u\r\n",
-                       cmd, (unsigned int)is_relay_on_cmd, (unsigned int)is_relay_off_cmd);
-              DEBUG_SendString(lora_cmd_dbg);
+                       "[LORA CMD] cmd=%s, r1_on=%u, r1_off=%u, r2_on=%u, r2_off=%u\r\n",
+                       cmd,
+                       (unsigned int)is_relay1_on_cmd,
+                       (unsigned int)is_relay1_off_cmd,
+                       (unsigned int)is_relay2_on_cmd,
+                       (unsigned int)is_relay2_off_cmd);
+              LORA_DEBUG_LOG(lora_cmd_dbg);
 #endif
 
               /* 处理继电器命令 */
-              if(is_relay_on_cmd)
+              if(is_relay1_on_cmd)
               {
                 if(g_lora_configured)
                 {
@@ -809,34 +723,17 @@ int main(void)
 #if LORA_DEBUG_VERBOSE
                   char relay_dbg[96];
                   snprintf(relay_dbg, sizeof(relay_dbg),
-                           "[RELAY] ON exec, state=%u\r\n", (unsigned int)RELAY_GetState());
-                  DEBUG_SendString(relay_dbg);
+                           "[RELAY1] ON exec, state=%u\r\n",
+                           (unsigned int)RELAY_GetState());
+                  LORA_DEBUG_LOG(relay_dbg);
 #endif
                 }
               }
               else if(strcmp(cmd, "GETDATA") == 0 || strncmp(cmd, "GETDATA", 7) == 0)
               {
-                /* 同一批次只处理一次getData */
-                if(!getdata_handled)
-                {
-                  g_getdata_miss_count = 0;
-                  g_waiting_getdata_ack = 0;
-#if LORA_DEBUG_VERBOSE
-                  DEBUG_SendString("[LORA CMD] GETDATA ack received\r\n");
-#endif
-
-                  /* 绿色LED闪烁一下（熄灭->延时->点亮） */
-                  if(GREEN_LED_GetState())
-                  {
-                    GREEN_LED_Off();
-                    HAL_Delay(50);  /* 熄灭50ms */
-                    GREEN_LED_On(); /* 恢复点亮 */
-                  }
-
-                  getdata_handled = 1;
-                }
+                LORA_HandleGetDataAck(&getdata_handled);
               }
-              else if(is_relay_off_cmd)
+              else if(is_relay1_off_cmd)
               {
                 if(g_lora_configured)
                 {
@@ -845,8 +742,39 @@ int main(void)
 #if LORA_DEBUG_VERBOSE
                   char relay_dbg[96];
                   snprintf(relay_dbg, sizeof(relay_dbg),
-                           "[RELAY] OFF exec, state=%u\r\n", (unsigned int)RELAY_GetState());
-                  DEBUG_SendString(relay_dbg);
+                           "[RELAY1] OFF exec, state=%u\r\n",
+                           (unsigned int)RELAY_GetState());
+                  LORA_DEBUG_LOG(relay_dbg);
+#endif
+                }
+              }
+              else if(is_relay2_on_cmd)
+              {
+                if(g_lora_configured)
+                {
+                  RELAY2_On();
+                  StateSender_ReportRelayActionOnce();
+#if LORA_DEBUG_VERBOSE
+                  char relay_dbg[96];
+                  snprintf(relay_dbg, sizeof(relay_dbg),
+                           "[RELAY2] ON exec, state=%u\r\n",
+                           (unsigned int)RELAY2_GetState());
+                  LORA_DEBUG_LOG(relay_dbg);
+#endif
+                }
+              }
+              else if(is_relay2_off_cmd)
+              {
+                if(g_lora_configured)
+                {
+                  RELAY2_Off();
+                  StateSender_ReportRelayActionOnce();
+#if LORA_DEBUG_VERBOSE
+                  char relay_dbg[96];
+                  snprintf(relay_dbg, sizeof(relay_dbg),
+                           "[RELAY2] OFF exec, state=%u\r\n",
+                           (unsigned int)RELAY2_GetState());
+                  LORA_DEBUG_LOG(relay_dbg);
 #endif
                 }
               }
@@ -856,7 +784,7 @@ int main(void)
                 char unknown_cmd_msg[160];
                 snprintf(unknown_cmd_msg, sizeof(unknown_cmd_msg),
                          "[LORA] Unknown payload: %s\r\n", payload);
-                DEBUG_SendString(unknown_cmd_msg);
+                LORA_DEBUG_LOG(unknown_cmd_msg);
 #endif
               }
             }
@@ -866,7 +794,7 @@ int main(void)
               char parse_fail_dbg[320];
               snprintf(parse_fail_dbg, sizeof(parse_fail_dbg),
                        "[LORA RX IGNORE] line=%s\r\n", line);
-              DEBUG_SendString(parse_fail_dbg);
+              LORA_DEBUG_LOG(parse_fail_dbg);
 #endif
             }
           }
@@ -903,36 +831,14 @@ int main(void)
     if(g_lora_configured && g_getdata_miss_count >= 3)
     {
 #if LORA_DEBUG_VERBOSE
-      DEBUG_SendString("[LORA] getData timeout x3, exit send mode and reinit\r\n");
+      LORA_DEBUG_LOG("[LORA] getData timeout x3, exit send mode and reinit\r\n");
 #endif
 
-      /* 关键：回到默认监听参数(ff,ff/00)，以便接收服务器的重新分配下行 */
-      if(LORA_Init(9600) != 0)
-      {
-        /* 初始化失败时也继续进入未配置态，由后续重试拉起 */
-      }
-      LORA_RearmRxIT();
-
-      /* 退出发送模式并请求重新配置 */
-      g_lora_configured = 0;
-      g_getdata_miss_count = 0;
-      g_waiting_getdata_ack = 0;
-      g_config_retry_interval_ms = 5000;
-      g_config_retry_jitter_ms = 0;
-
-      /* 指示状态：绿灯灭，红灯呼吸 */
-      GREEN_LED_Off();
-      RED_LED_Breathing_Init();
-
-      /* 等待LoRa模块重启完成并稳定（LORA_Init最后会AT+RESET） */
-      HAL_Delay(500);
-
-      /* 重初始化后请求服务器重新下发配置 */
-      (void)Send_Config_Request();
+      LORA_ReinitAndConfig();
     }
 
-    /* 短暂延时，避免CPU空转 */
-    HAL_Delay(10);
+    /* 事件驱动空闲等待：避免CPU空转且不引入固定10ms阻塞窗口 */
+    MainLoop_Idle();
   }
 }
 
@@ -1175,8 +1081,18 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;   /* 低速即可 */
   HAL_GPIO_Init(RELAY_GPIO_Port, &GPIO_InitStruct);
 
-  /* 初始化继电器为吸合状态（PA8低电平=吸合，NO导通，负载通电，默认有人） */
-  HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_RESET);
+  /* 初始化继电器为断开状态（PA8高电平=断开，负载通电） */
+  HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_SET);
+
+  /* 配置继电器2控制引脚 (PA5) */
+  GPIO_InitStruct.Pin = RELAY2_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;    /* 推挽输出模式 */
+  GPIO_InitStruct.Pull = GPIO_NOPULL;            /* 无上下拉 */
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;   /* 低速即可 */
+  HAL_GPIO_Init(RELAY2_GPIO_Port, &GPIO_InitStruct);
+
+  /* 初始化继电器2为断开状态（PA5高电平=断开，负载通电） */
+  HAL_GPIO_WritePin(RELAY2_GPIO_Port, RELAY2_Pin, GPIO_PIN_SET);
 
   /* 配置红色LED指示灯引脚 (PA1) */
   GPIO_InitStruct.Pin = RED_LED_Pin;
@@ -1206,23 +1122,23 @@ static void MX_GPIO_Init(void)
 /* 可以在此处定义自定义函数 */
 
 /**
-  * @brief 打开继电器（吸合）
+  * @brief 打开继电器（断开）
   * @retval None
-  * @details 将PA8引脚设置为低电平，继电器吸合，NO导通，负载通电
+  * @details 将PA8引脚设置为高电平，继电器断开，负载通电
   */
 void RELAY_On(void)
 {
-  HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_SET);
 }
 
 /**
-  * @brief 关闭继电器（断开）
+  * @brief 关闭继电器（吸合）
   * @retval None
-  * @details 将PA8引脚设置为高电平，继电器断开，NO断开，负载断电
+  * @details 将PA8引脚设置为低电平，继电器吸合，负载断电
   */
 void RELAY_Off(void)
 {
-  HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(RELAY_GPIO_Port, RELAY_Pin, GPIO_PIN_RESET);
 }
 
 /**
@@ -1238,51 +1154,51 @@ void RELAY_Toggle(void)
 /**
   * @brief 获取继电器状态
   * @retval 1: 继电器打开, 0: 继电器关闭
-  * @details 读取PA8引脚的当前状态(低电平触发)
+  * @details 读取PA8引脚的当前状态(高电平触发)
   */
 uint8_t RELAY_GetState(void)
 {
-  return HAL_GPIO_ReadPin(RELAY_GPIO_Port, RELAY_Pin) == GPIO_PIN_RESET ? 1 : 0;
+  return HAL_GPIO_ReadPin(RELAY_GPIO_Port, RELAY_Pin) == GPIO_PIN_SET ? 1 : 0;
 }
 
 /**
-  * @brief 打开绿色LED
+  * @brief 打开继电器2（断开）
   * @retval None
-  * @details 将PA0引脚设置为高电平，绿色LED点亮
+  * @details 将PA5引脚设置为高电平，继电器2断开，负载通电
   */
-void GREEN_LED_On(void)
+void RELAY2_On(void)
 {
-  HAL_GPIO_WritePin(GREEN_LED_GPIO_Port, GREEN_LED_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(RELAY2_GPIO_Port, RELAY2_Pin, GPIO_PIN_SET);
 }
 
 /**
-  * @brief 关闭绿色LED
+  * @brief 关闭继电器2（吸合）
   * @retval None
-  * @details 将PA0引脚设置为低电平，绿色LED熄灭
+  * @details 将PA5引脚设置为低电平，继电器2吸合，负载断电
   */
-void GREEN_LED_Off(void)
+void RELAY2_Off(void)
 {
-  HAL_GPIO_WritePin(GREEN_LED_GPIO_Port, GREEN_LED_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(RELAY2_GPIO_Port, RELAY2_Pin, GPIO_PIN_RESET);
 }
 
 /**
-  * @brief 切换绿色LED状态
+  * @brief 切换继电器2状态
   * @retval None
-  * @details 切换PA0引脚的电平状态
+  * @details 切换PA5引脚的电平状态
   */
-void GREEN_LED_Toggle(void)
+void RELAY2_Toggle(void)
 {
-  HAL_GPIO_TogglePin(GREEN_LED_GPIO_Port, GREEN_LED_Pin);
+  HAL_GPIO_TogglePin(RELAY2_GPIO_Port, RELAY2_Pin);
 }
 
 /**
-  * @brief 获取绿色LED状态
-  * @retval 1: LED点亮, 0: LED熄灭
-  * @details 读取PA0引脚的当前状态
+  * @brief 获取继电器2状态
+  * @retval 1: 继电器2打开, 0: 继电器2关闭
+  * @details 读取PA5引脚的当前状态(高电平触发)
   */
-uint8_t GREEN_LED_GetState(void)
+uint8_t RELAY2_GetState(void)
 {
-  return HAL_GPIO_ReadPin(GREEN_LED_GPIO_Port, GREEN_LED_Pin) == GPIO_PIN_SET ? 1 : 0;
+  return HAL_GPIO_ReadPin(RELAY2_GPIO_Port, RELAY2_Pin) == GPIO_PIN_SET ? 1 : 0;
 }
 
 /**
@@ -1340,37 +1256,22 @@ uint8_t Process_Sensor_Status(uint8_t *last_combined_state)
 
     if(radar_has_person == 1)
     {
-      /* 检测到人：吸合继电器（NO导通，负载通电） */
+      /* 检测到人：继电器断开（高电平），负载通电 */
       RELAY_On();
-      // DEBUG_SendString("[SENSOR] State changed: NOBODY -> PERSON, Relay ON (NO connected)\r\n");
+      RELAY2_On();
+      LORA_DEBUG_LOG("[SENSOR] State changed: NOBODY -> PERSON, Relay ON (NO connected)\r\n");
     }
     else
     {
-      /* 无人：断开继电器（NO断开，负载断电）- 已禁用 */
+      /* 无人：继电器吸合（低电平），负载断电 - 已禁用 */
       // RELAY_Off();
-      // DEBUG_SendString("[SENSOR] State changed: PERSON -> NOBODY, Relay OFF (NO disconnected)\r\n");
+      // RELAY2_Off();
+      LORA_DEBUG_LOG("[SENSOR] State changed: PERSON -> NOBODY, Relay OFF (NO disconnected)\r\n");
     }
 
     /* 立即发送一次快速状态 */
-    if(g_state_sender.initialized)
-    {
-      // DEBUG_SendString("[SENSOR] Sending fast status...\r\n");
-      int send_ret = StateSender_SendFast();
-      g_state_sender.last_send_time = HAL_GetTick();
-      if(send_ret == 0 && g_state_sender.fast_remaining > 0)
-      {
-        g_state_sender.fast_remaining--;
-        if(g_state_sender.fast_remaining == 0)
-        {
-          g_state_sender.interval_ms = STATE_SENDER_NORMAL_INTERVAL_MS;  /* 正常发送间隔 */
-          // DEBUG_SendString("[STATE] Switch to normal mode (15s)\r\n");
-        }
-      }
-    }
-    else
-    {
-      // DEBUG_SendString("[SENSOR] State sender not initialized, skip sending\r\n");
-    }
+    LORA_DEBUG_LOG("[SENSOR] Sending fast status...\r\n");
+    (void)StateSender_SendFastImmediate();
   }
 
   /* 更新上次的雷达状态 */
@@ -1380,397 +1281,33 @@ uint8_t Process_Sensor_Status(uint8_t *last_combined_state)
 }
 
 /**
-  * @brief 初始化状态发送机
-  * @retval None
-  * @details 初始化发送状态和时间戳，通电后直接进入快速模式（10次，5s间隔）
-  *          10次快速发送后自动切换到正常模式（15s间隔）
-  */
-void StateSender_Init(void)
+ * @brief 重初始化LoRa并进入未配置重连态
+ * @retval None
+ */
+static void LORA_ReinitAndConfig(void)
 {
-  g_state_sender.send_state = 0;
-  g_state_sender.last_send_time = HAL_GetTick();
-  g_state_sender.interval_ms = STATE_SENDER_FAST_INTERVAL_MS;  /* 快速发送间隔 */
-  g_state_sender.fast_remaining = 10;    /* 通电后直接进入快速模式（10次） */
-  g_state_sender.initialized = 1;
-}
-
-/**
-  * @brief 进入/重置快速发送模式
-  * @retval None
-  */
-void StateSender_ResetFastMode(void)
-{
-  g_state_sender.interval_ms = STATE_SENDER_FAST_INTERVAL_MS;  /* 快速发送间隔 */
-  g_state_sender.fast_remaining = 10;
-  g_state_sender.last_send_time = HAL_GetTick();
-  // DEBUG_SendString("[STATE] Fast mode reset (10 times)\r\n");
-}
-
-/**
-  * @brief 状态发送机更新
-  * @retval None
-  * @details 快速模式（10次，5s间隔）后切换到正常模式（15s间隔）
-  */
-void StateSender_Update(void)
-{
-  if(!g_state_sender.initialized)
-  {
-    /* 未初始化，不发送 */
-    return;
-  }
-
-  uint32_t now = HAL_GetTick();
-
-  /* 快速模式下，收到下行后优先留出接收窗口，降低下行丢失概率 */
-  if(g_state_sender.fast_remaining > 0 && g_state_sender.fast_remaining != 0xFF)
-  {
-    if((now - g_last_downlink_time) < LORA_DOWNLINK_GUARD_MS)
-    {
-      return;
-    }
-  }
-  if(now - g_state_sender.last_send_time < g_state_sender.interval_ms)
-  {
-    return;
-  }
-
-  /* 触发一次发送 */
-  if(g_state_sender.fast_remaining > 0 && g_state_sender.fast_remaining != 0xFF)
-  {
-    /* 快速模式：发送快速状态 */
-    // DEBUG_SendString("[STATE] Triggering fast scheduled send...\r\n");
-    (void)StateSender_SendFast();
-  }
-  else
-  {
-    /* 正常模式：发送完整状态 */
-    // DEBUG_SendString("[STATE] Triggering normal scheduled send...\r\n");
-    (void)StateSender_SendNormal();
-  }
-  g_state_sender.send_state++;
-  g_state_sender.last_send_time = now;
-
-  /* 处理快速模式次数递减（0xFF表示永久快速模式，不递减） */
-  if(g_state_sender.fast_remaining > 0 && g_state_sender.fast_remaining != 0xFF)
-  {
-    g_state_sender.fast_remaining--;
-    char mode_msg[128];
-    snprintf(mode_msg, sizeof(mode_msg), "[STATE] Fast remaining: %d\r\n", g_state_sender.fast_remaining);
-    // DEBUG_SendString(mode_msg);
-
-    if(g_state_sender.fast_remaining == 0)
-    {
-      g_state_sender.interval_ms = STATE_SENDER_NORMAL_INTERVAL_MS;  /* 正常发送间隔 */
-      // DEBUG_SendString("[STATE] Switch to normal mode (15s)\r\n");
-    }
-  }
-}
-
-/**
-  * @brief 快速发送函数
-  * @retval 0: 成功, -1: 失败
-  * @details 发送格式: dev_设备码P_平均P值R_平均R值S_状态
-  */
-int StateSender_SendFast(void)
-{
-  /* 获取雷达数据 */
-  Radar_TargetStatus_t status = StateSender_GetRadarStatus();
-  uint8_t s_val = (status == RADAR_TARGET_NOBODY) ? 0 : 1;
-  uint16_t valid_count = StateSender_GetRadarValidCount();
-  uint32_t p_sum = StateSender_GetRadarPowerSum();
-  uint32_t r_sum = StateSender_GetRadarRangeSum();
-  uint32_t p_avg = 0;
-  uint32_t r_avg = 0;
-  if(s_val == 1 && valid_count > 0)
-  {
-    p_avg = p_sum / valid_count;
-    r_avg = r_sum / valid_count;
-  }
-
-  /* 获取继电器状态 */
-  uint8_t relay_state = RELAY_GetState();
-
-  char payload[64];
-  snprintf(payload, sizeof(payload), "dev_%sP_%luR_%luS_%uRELAY_%u",
-           g_device_code,
-           (unsigned long)p_avg,
-           (unsigned long)r_avg,
-           s_val,
-           relay_state);
-
-  if(LORA_SendFormattedData(payload) == 0)
-  {
-    /* 发送完成后重置毫米波雷达累积值 */
-    RADAR_ClearAccumulatedData();
-    LORA_MarkUplinkAndTrackGetdata();
-    // DEBUG_SendString("[STATE] Fast status sent\r\n");
-    return 0;
-  }
-
-  // DEBUG_SendString("[STATE] Fast status send failed\r\n");
-  return -1;
-}
-
-/**
-  * @brief 正常发送函数 (雷达状态固定为无人，后续接入真实雷达数据)
-  * @retval 0: 成功, -1: 失败
-  * @details 发送格式: dev_设备码humi_湿度值temp_温度值sound_声音值light_光照值P_平均P值R_平均R值S_状态
-  */
-int StateSender_SendNormal(void)
-{
-  /* 获取温湿度 */
-  float temp = 0.0f;
-  float humi = 0.0f;
-  (void)StateSender_GetTempHumi(&temp, &humi);
-
-  /* 读取两次上报间隔内的声音平均值（ADC原始值） */
-  uint16_t sound_raw = SoundAccumulator_GetAverageAndReset();
-
-  /* 计算电压值（毫伏，避免浮点数格式化问题） */
-  uint16_t sound_mv = (uint16_t)(sound_raw * 3300UL / 4095UL);
-
-  /* 输出声音传感器详细诊断信息 */
-  char sound_debug[128];
-  snprintf(sound_debug, sizeof(sound_debug), "[SOUND] AVG ADC:%u, Volt:%u.%03uV\r\n",
-           sound_raw, sound_mv / 1000, sound_mv % 1000);
-  // DEBUG_SendString(sound_debug);
-
-  /* 读取光照强度 */
-  float lux = 0.0f;
-  int32_t lux10 = 0;  // 光照值*10（保留1位小数）
-  uint16_t als_raw = 0;
-  uint16_t als_conf = 0;
-  uint16_t als_id = 0;
-  static uint8_t light_zero_streak = 0;
-  int8_t als_raw_ok = VEML7700_Soft_ReadRaw(&als_raw);
-  int8_t als_conf_ok = VEML7700_ReadReg(VEML7700_REG_ALS_CONF, &als_conf);
-  int8_t als_id_ok = VEML7700_ReadReg(VEML7700_REG_INT_ID, &als_id);
-
-  if(VEML7700_Soft_ReadLux(&lux) == 0)
-  {
-    lux10 = (int32_t)(lux * 10.0f + (lux >= 0 ? 0.5f : -0.5f));
-    char light_debug[64];
-    snprintf(light_debug, sizeof(light_debug), "[LIGHT] %ld.%01lu lux\r\n",
-             (long)(lux10 / 10), (unsigned long)(lux10 >= 0 ? (lux10 % 10) : (-(lux10 % 10))));
-    // DEBUG_SendString(light_debug);
-
-    /* 诊断输出：原始计数与配置寄存器 */
-    char light_diag[128];
-    snprintf(light_diag, sizeof(light_diag),
-         "[LIGHT DBG] raw:%u conf:0x%04X id:0x%04X raw_ok:%d conf_ok:%d id_ok:%d\r\n",
-         (unsigned int)als_raw, (unsigned int)als_conf, (unsigned int)als_id,
-         als_raw_ok, als_conf_ok, als_id_ok);
-    // DEBUG_SendString(light_diag);
-
-    /* 连续原始值为0时自动重初始化一次，尝试恢复 */
-    if(als_raw_ok == 0 && als_raw == 0)
-    {
-      if(light_zero_streak < 255)
-      {
-        light_zero_streak++;
-      }
-    }
-    else
-    {
-      light_zero_streak = 0;
-    }
-
-    if(light_zero_streak >= 3)
-    {
-      // DEBUG_SendString("[LIGHT] raw=0 streak, reinit sensor...\r\n");
-      if(VEML7700_Soft_Init() == 0)
-      {
-        // DEBUG_SendString("[LIGHT] reinit OK\r\n");
-      }
-      else
-      {
-        // DEBUG_SendString("[LIGHT] reinit FAILED\r\n");
-      }
-      light_zero_streak = 0;
-    }
-  }
-  else
-  {
-    // DEBUG_SendString("[LIGHT] ERROR: read failed\r\n");
-  }
-
-  /* 获取雷达数据 */
-  Radar_TargetStatus_t status = StateSender_GetRadarStatus();
-  uint8_t s_val = (status == RADAR_TARGET_NOBODY) ? 0 : 1;
-  uint16_t valid_count = StateSender_GetRadarValidCount();
-  uint32_t p_sum = StateSender_GetRadarPowerSum();
-  uint32_t r_sum = StateSender_GetRadarRangeSum();
-  uint32_t p_avg = 0;
-  uint32_t r_avg = 0;
-  if(s_val == 1 && valid_count > 0)
-  {
-    p_avg = p_sum / valid_count;
-    r_avg = r_sum / valid_count;
-  }
-
-  /* 温湿度保留2位小数，*100发送为整数（如 22.34 -> 2234） */
-  int32_t humi100 = (int32_t)(humi * 100.0f + (humi >= 0 ? 0.5f : -0.5f));
-  int32_t temp100 = (int32_t)(temp * 100.0f + (temp >= 0 ? 0.5f : -0.5f));
-
-  /* 获取继电器状态 */
-  uint8_t relay_state = RELAY_GetState();
-
-  /* 读取CO2浓度（非阻塞状态机方式）*/
-  uint16_t co2_ppm = 0;
-  uint8_t co2_valid = 0;
-
-  if(MHZ19B_Co2SM_IsDone(&g_co2_sm))
-  {
-    /* 上次测量已完成：取结果，启动新一轮 */
-    co2_ppm = g_co2_sm.result_ppm;
-    co2_valid = g_co2_sm.valid;
-    MHZ19B_Co2SM_Start(&g_co2_sm);
-  }
-  else
-  {
-    /* 测量仍在进行中：使用缓存结果 */
-    co2_ppm = g_co2_sm.result_ppm;
-    co2_valid = g_co2_sm.valid;
-  }
-
-#if LORA_DEBUG_VERBOSE
-  if((co2_valid == 0) || (co2_ppm > 0 && co2_ppm < 200))
-  {
-    char co2_diag_msg[128];
-    snprintf(co2_diag_msg, sizeof(co2_diag_msg),
-             "[CO2 DBG] valid:%u ppm:%u high:%ums low:%ums period:%ums state:%u\r\n",
-             co2_valid, co2_ppm, g_co2_sm.high_time_ms, g_co2_sm.low_time_ms,
-             (uint16_t)(g_co2_sm.high_time_ms + g_co2_sm.low_time_ms), g_co2_sm.state);
-    DEBUG_SendString(co2_diag_msg);
-  }
-#endif
-
-  char payload[128];
-  snprintf(payload, sizeof(payload), "dev_%shumi_%ldtemp_%ldsound_%ulight_%ldP_%luR_%luS_%uRELAY_%uCO2_%u",
-           g_device_code,
-           (long)humi100, (long)temp100,
-           sound_raw, (long)lux10,
-           (unsigned long)p_avg, (unsigned long)r_avg, s_val,
-           relay_state, co2_valid ? co2_ppm : 0);
-
-  if(LORA_SendFormattedData(payload) == 0)
-  {
-    /* 发送完成后重置毫米波雷达累积值 */
-    RADAR_ClearAccumulatedData();
-    LORA_MarkUplinkAndTrackGetdata();
-    // DEBUG_SendString("[STATE] Normal status sent\r\n");
-    return 0;
-  }
-
-  // DEBUG_SendString("[STATE] Normal status send failed\r\n");
-  return -1;
-}
-
-/**
-  * @brief 获取毫米波雷达状态
-  * @retval Radar_TargetStatus_t 雷达状态
-  */
-Radar_TargetStatus_t StateSender_GetRadarStatus(void)
-{
-  return RADAR_GetTargetStatus();
-}
-
-/**
-  * @brief 获取P值总值
-  * @retval P值累积总和
-  */
-uint32_t StateSender_GetRadarPowerSum(void)
-{
-  return Radar.target_info.power_sum;
-}
-
-/**
-  * @brief 获取R值总值
-  * @retval R值累积总和
-  */
-uint32_t StateSender_GetRadarRangeSum(void)
-{
-  return Radar.target_info.range_sum;
-}
-
-/**
-  * @brief 获取有效次数
-  * @retval 有效数据次数
-  */
-uint16_t StateSender_GetRadarValidCount(void)
-{
-  return Radar.target_info.valid_count;
-}
-
-/**
-  * @brief 获取温湿度
-  * @param temp: 温度输出指针
-  * @param humi: 湿度输出指针
-  * @retval 0: 成功, -1: 失败
-  */
-int StateSender_GetTempHumi(float *temp, float *humi)
-{
-  if(temp == NULL || humi == NULL)
-  {
-    return -1;
-  }
-
-  return (SHT30_Soft_Read(temp, humi) == 0) ? 0 : -1;
-}
-
-/**
-  * @brief 获取声音等级
-  * @retval 声音等级(0-100)，255表示失败
-  * @details 读取声音传感器的声音强度等级
-  */
-uint16_t StateSender_GetSoundLevel(void)
-{
-  return SOUND_SENSOR_GetLevel();
-}
-
-/**
-  * @brief 重新初始化LoRa并配置MAC/CHANNEL
-  * @retval None
-  */
-void LORA_ReinitAndConfig(void)
-{
-  /* 进入AT模式需要前后静默窗口，这里在重初始化前保持2s静默 */
-  // DEBUG_SendString("[LORA] Starting reinitialization...\r\n");
-
-  /* 清空LoRa接收缓冲区 */
-  extern LORA_Status_t lora_status;
-  lora_status.rx_length = 0;
-  lora_status.data_ready = 0;
-  memset(lora_status.rx_buffer, 0, LORA_RX_BUFFER_SIZE);
-
-  /* 清空UART的错误标志和接收缓冲区 */
-  __HAL_UART_CLEAR_OREFLAG(&huart2);
-  __HAL_UART_CLEAR_FEFLAG(&huart2);
-  __HAL_UART_CLEAR_NEFLAG(&huart2);
-  __HAL_UART_CLEAR_IDLEFLAG(&huart2);
-
-  /* 保持2秒静默,确保没有任何数据传输 */
-  // DEBUG_SendString("[LORA] Waiting 2s for silence...\r\n");
-  HAL_Delay(2000);
-
-  // DEBUG_SendString("[LORA] Calling LORA_Init...\r\n");
+  /* 关键：回到默认监听参数(ff,ff/00)，以便接收服务器重新分配下行 */
   if(LORA_Init(9600) != 0)
   {
-    // DEBUG_SendString("[LORA] Reinit failed\r\n");
-    return;
+    /* 初始化失败时也继续进入未配置态，由后续重试拉起 */
   }
+  LORA_RearmRxIT();
 
-  if(g_lora_mac[0] != '\0' && g_lora_channel[0] != '\0')
-  {
-    if(LORA_ConfigureMacAndChannel(g_lora_mac, g_lora_channel) == 0)
-    {
-      // DEBUG_SendString("[LORA] Re-configured MAC/CHANNEL successfully\r\n");
-    }
-    else
-    {
-      // DEBUG_SendString("[LORA] Re-config MAC/CHANNEL failed\r\n");
-    }
-  }
+  /* 退出发送模式并清空本轮getData跟踪 */
+  g_lora_configured = 0;
+  g_getdata_miss_count = 0;
+  g_waiting_getdata_ack = 0;
+  g_config_request_count = 0;
+  g_config_retry_interval_ms = 5000;
+  g_config_retry_jitter_ms = 0;
+  DeferredAction_Reset();
+
+  /* 指示状态：绿灯灭，红灯呼吸 */
+  GREEN_LED_Off();
+  RED_LED_Breathing_Init();
+
+  /* 等待LoRa模块重启稳定后，请求服务器重新下发配置（非阻塞） */
+  DeferredAction_Schedule(LORA_DEFERRED_ACTION_SEND_CONFIG_REQUEST, 500U, NULL, NULL);
 }
 
 /**
@@ -1842,11 +1379,13 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
       uint32_t now = HAL_GetTick();
       if(now - last_err_log_time >= 1000)
       {
-        char err_msg[128];
         err_count++;
-        snprintf(err_msg, sizeof(err_msg), "[RADAR] UART error recovered, RX restarted (err=0x%08lX cnt=%lu)\r\n",
-                 (unsigned long)err, (unsigned long)err_count);
-        // DEBUG_SendString(err_msg);
+        LORA_DEBUG_CODE(
+          char err_msg[128];
+          snprintf(err_msg, sizeof(err_msg), "[RADAR] UART error recovered, RX restarted (err=0x%08lX cnt=%lu)\r\n",
+                   (unsigned long)err, (unsigned long)err_count);
+          LORA_DEBUG_LOG(err_msg);
+        );
         last_err_log_time = now;
       }
     }
@@ -1856,20 +1395,19 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
       uint32_t now = HAL_GetTick();
       if(now - last_err_log_time >= 1000)
       {
-        char err_msg[128];
         err_count++;
-        snprintf(err_msg, sizeof(err_msg), "[RADAR] UART error recovery failed (err=0x%08lX cnt=%lu)\r\n",
-                 (unsigned long)err, (unsigned long)err_count);
-        // DEBUG_SendString(err_msg);
+        LORA_DEBUG_CODE(
+          char err_msg[128];
+          snprintf(err_msg, sizeof(err_msg), "[RADAR] UART error recovery failed (err=0x%08lX cnt=%lu)\r\n",
+                   (unsigned long)err, (unsigned long)err_count);
+          LORA_DEBUG_LOG(err_msg);
+        );
         last_err_log_time = now;
       }
     }
   }
   else if(huart->Instance == USART2)
   {
-    extern LORA_Status_t lora_status;
-    extern uint8_t lora_rx_byte;
-
     __HAL_UART_CLEAR_OREFLAG(huart);
     __HAL_UART_CLEAR_FEFLAG(huart);
     __HAL_UART_CLEAR_NEFLAG(huart);

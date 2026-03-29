@@ -11,6 +11,7 @@
   */
 /* USER CODE END Header */
 
+#include "main.h"
 #include "GREEN_LED.h"
 
 /**

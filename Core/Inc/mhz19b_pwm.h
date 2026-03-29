@@ -16,7 +16,7 @@
 
 #include "stm32f1xx_hal.h"
 
-/* GPIO引脚定义 - PA6 */
+/* GPIO引脚定义 - PA6 (EXTI6) */
 #define MHZ19B_PWM_PIN        GPIO_PIN_6
 #define MHZ19B_PWM_GPIO_PORT  GPIOA
 
@@ -52,9 +52,10 @@ typedef struct {
 
 /* 函数声明 */
 void MHZ19B_PWM_Init(void);
-uint8_t MHZ19B_PWM_Read(uint16_t *co2_ppm);
+void MHZ19B_PWM_EXTI_IRQHandler(void);
 void MHZ19B_PWM_GetLastPulse(uint16_t *high_ms, uint16_t *low_ms, uint16_t *period_ms, uint8_t *status);
 void MHZ19B_PWM_GetPinSampleStats(uint16_t sample_ms, uint16_t *high_ms, uint16_t *low_ms, uint16_t *edge_count);
+/* 对外仅暴露非阻塞接口，避免误用阻塞读取导致主循环卡顿。 */
 void MHZ19B_Co2SM_Start(MHZ19B_Co2SM_t *sm);
 void MHZ19B_Co2SM_Update(MHZ19B_Co2SM_t *sm);
 uint8_t MHZ19B_Co2SM_IsDone(const MHZ19B_Co2SM_t *sm);

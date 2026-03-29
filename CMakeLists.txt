@@ -28,6 +28,8 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 project(${CMAKE_PROJECT_NAME})
 message("Build type: " ${CMAKE_BUILD_TYPE})
 
+option(LORA_DEBUG_VERBOSE_BUILD "Enable verbose LoRa debug logs" OFF)
+
 # Enable CMake support for ASM and C languages
 enable_language(C ASM)
 
@@ -48,7 +50,11 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     "Core/Src/lora.c"
     "Core/Src/veml7700_soft.c"
     "Core/Src/RED_LED.c"
+    "Core/Src/GREEN_LED.c"
     "Core/Src/mhz19b_pwm.c"
+    "Core/Src/sound_accumulator.c"
+    "Core/Src/deferred_action.c"
+    "Core/Src/state_sender.c"
 )
 
 # Add include paths
@@ -59,6 +65,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
+    $<$<BOOL:${LORA_DEBUG_VERBOSE_BUILD}>:LORA_DEBUG_VERBOSE=1>
 )
 
 # Remove wrong libob.a library dependency when using cpp files
