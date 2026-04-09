@@ -50,6 +50,7 @@ uint8_t lora_rx_byte;  // 单字节接收缓冲区（用于中断接收）- 需�
 #define LORA_FORMATTED_PACKET_MAX_LEN (LORA_PACKET_HEADER_LEN + \
                                        LORA_FORMATTED_PAYLOAD_MAX_LEN + \
                                        LORA_PACKET_END_LEN)
+#define LORA_AT_RX_DUMP_MAX_LEN      (LORA_RX_BUFFER_SIZE - 1U)
 
 /* ==================== 私有函数声明 ==================== */
 
@@ -60,8 +61,10 @@ typedef struct {
     const char *command;         // AT命令字符串
     uint32_t delay_ms;           // 响应等待时间
     const char *expected_response; // 期望的响应字符串(NULL表示不检查)
+    uint8_t allow_no_response;   // 允许无响应也判定成功（如AT+RESET）
     uint8_t max_retries;         // 最大重试次数
     const char *step_name;       // 步骤名称(用于调试输出)
+    uint8_t compact_log;         // 精简日志模式：减少成功路径打印
 } LORA_ATCommandConfig_t;
 
 /**
@@ -72,10 +75,35 @@ typedef struct {
   */
 static int LORA_SendATCommand(const LORA_ATCommandConfig_t *config);
 static void LORA_WaitCooperativeMs(uint32_t wait_ms);
+static uint32_t LORA_EnterCritical(void);
+static void LORA_ExitCritical(uint32_t primask);
+static uint8_t lora_is_hex_char(char c);
 
 /* 默认弱实现：应用层可在main.c重写以推进其他任务 */
 __weak void LORA_WaitHook(void)
 {
+}
+
+static uint32_t LORA_EnterCritical(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    return primask;
+}
+
+static void LORA_ExitCritical(uint32_t primask)
+{
+    if((primask & 0x1U) == 0U)
+    {
+        __enable_irq();
+    }
+}
+
+static uint8_t lora_is_hex_char(char c)
+{
+    return (uint8_t)(((c >= '0') && (c <= '9')) ||
+                     ((c >= 'a') && (c <= 'f')) ||
+                     ((c >= 'A') && (c <= 'F')));
 }
 
 /* ==================== 私有函数实现 ==================== */
@@ -147,7 +175,7 @@ static int LORA_SendATCommand(const LORA_ATCommandConfig_t *config)
                            config->max_retries : LORA_AT_MAX_RETRIES;
 
     /* 输出步骤名称 */
-    if(config->step_name != NULL)
+    if((config->compact_log == 0U) && (config->step_name != NULL))
     {
 #if LORA_DEBUG_VERBOSE
         LORA_DEBUG_LOG(config->step_name);
@@ -158,8 +186,10 @@ static int LORA_SendATCommand(const LORA_ATCommandConfig_t *config)
     for(uint8_t retry = 0; retry < max_retries; retry++)
     {
         /* 清空接收缓冲区 */
+        uint32_t primask = LORA_EnterCritical();
         lora_status.rx_length = 0;
         lora_status.data_ready = 0;
+        LORA_ExitCritical(primask);
 
         /* 重启UART接收中断,确保能接收响应 */
         /* 如果UART接收状态机正在运行,先中止它 */
@@ -176,37 +206,58 @@ static int LORA_SendATCommand(const LORA_ATCommandConfig_t *config)
         /* 等待响应：协作式等待，避免等待期间系统完全无响应 */
         LORA_WaitCooperativeMs(config->delay_ms);
 
-        /* 检查是否收到数据 */
+        /* AT命令流程非重入，使用静态快照避免每次调用占用大块栈空间 */
+        static uint8_t rx_snapshot[LORA_RX_BUFFER_SIZE];
+        uint16_t rx_snapshot_len = 0;
+        primask = LORA_EnterCritical();
         if(lora_status.rx_length > 0)
         {
-            /* 添加字符串结束符 */
-            lora_status.rx_buffer[lora_status.rx_length] = '\0';
+            rx_snapshot_len = lora_status.rx_length;
+            if(rx_snapshot_len > LORA_AT_RX_DUMP_MAX_LEN)
+            {
+                rx_snapshot_len = LORA_AT_RX_DUMP_MAX_LEN;
+            }
+            memcpy(rx_snapshot, lora_status.rx_buffer, rx_snapshot_len);
+            rx_snapshot[rx_snapshot_len] = '\0';
+        }
+        LORA_ExitCritical(primask);
 
+        if(rx_snapshot_len > 0U)
+        {
             /* 打印接收到的原始数据 */
-            LORA_DEBUG_CODE(
-                char debug_msg[LORA_DEBUG_MSG_SIZE];
-                int max_display_len = (lora_status.rx_length > LORA_RX_BUFFER_MAX_DISPLAY) ?
-                                      LORA_RX_BUFFER_MAX_DISPLAY : lora_status.rx_length;
-                snprintf(debug_msg, sizeof(debug_msg),
-                         "[LORA] Try %d: Rx (%d bytes): %.*s\r\n",
-                         retry + 1, lora_status.rx_length, max_display_len, lora_status.rx_buffer);
-                LORA_DEBUG_LOG(debug_msg);
-            );
+            if(config->compact_log == 0U)
+            {
+                LORA_DEBUG_CODE(
+                    char debug_msg[LORA_DEBUG_MSG_SIZE];
+                    int max_display_len = (rx_snapshot_len > LORA_RX_BUFFER_MAX_DISPLAY) ?
+                                          LORA_RX_BUFFER_MAX_DISPLAY : rx_snapshot_len;
+                    snprintf(debug_msg, sizeof(debug_msg),
+                             "[LORA] Try %d: Rx (%d bytes): %.*s\r\n",
+                             retry + 1, rx_snapshot_len, max_display_len, rx_snapshot);
+                    LORA_DEBUG_LOG(debug_msg);
+                );
+            }
 
             /* 检查期望的响应（使用大小写不敏感匹配） */
             if(config->expected_response != NULL)
             {
-                if(lora_strcasestr((char *)lora_status.rx_buffer, config->expected_response) != NULL)
+                if(lora_strcasestr((char *)rx_snapshot, config->expected_response) != NULL)
                 {
 #if LORA_DEBUG_VERBOSE
-                    LORA_DEBUG_LOG("[LORA] Command Success: Response matched\r\n");
+                    if(config->compact_log == 0U)
+                    {
+                        LORA_DEBUG_LOG("[LORA] Command Success: Response matched\r\n");
+                    }
 #endif
                     return 0;  // 成功
                 }
                 else
                 {
 #if LORA_DEBUG_VERBOSE
-                    LORA_DEBUG_LOG("[LORA] Command Failed: Expected response not found\r\n");
+                    if(config->compact_log == 0U)
+                    {
+                        LORA_DEBUG_LOG("[LORA] Command Failed: Expected response not found\r\n");
+                    }
 #endif
                 }
             }
@@ -214,15 +265,31 @@ static int LORA_SendATCommand(const LORA_ATCommandConfig_t *config)
             {
                 /* 不检查响应,只要收到数据就认为成功 */
 #if LORA_DEBUG_VERBOSE
-                LORA_DEBUG_LOG("[LORA] Command Success: Data received\r\n");
+                if(config->compact_log == 0U)
+                {
+                    LORA_DEBUG_LOG("[LORA] Command Success: Data received\r\n");
+                }
 #endif
                 return 0;
             }
         }
         else
         {
+            if(config->allow_no_response)
+            {
 #if LORA_DEBUG_VERBOSE
-            LORA_DEBUG_LOG("[LORA] Command Failed: No data received\r\n");
+                if(config->compact_log == 0U)
+                {
+                    LORA_DEBUG_LOG("[LORA] Command Success: No response allowed for this command\r\n");
+                }
+#endif
+                return 0;
+            }
+#if LORA_DEBUG_VERBOSE
+            if(config->compact_log == 0U)
+            {
+                LORA_DEBUG_LOG("[LORA] Command Failed: No data received\r\n");
+            }
 #endif
         }
 
@@ -260,6 +327,9 @@ static int LORA_SendATCommand(const LORA_ATCommandConfig_t *config)
   */
 int LORA_Init(uint32_t baudrate)
 {
+#if (LORA_DEFAULT_LEVEL > 9U)
+#error "LORA_DEFAULT_LEVEL must be 0..9"
+#endif
     /* 初始化状态结构体 */
     lora_status.state = LORA_STATE_IDLE;
     lora_status.rx_length = 0;
@@ -293,8 +363,12 @@ int LORA_Init(uint32_t baudrate)
     }
 
     /* 等待LoRa模块上电稳定 */
-    LORA_DEBUG_LOG("[LORA] Waiting for module power stabilization...\r\n");
     LORA_WaitCooperativeMs(500U);  /* 等待模块上电稳定 */
+
+    char level_cmd[16];
+    char level_expected[16];
+    snprintf(level_cmd, sizeof(level_cmd), "AT+LEVEL%u\r\n", (unsigned int)LORA_DEFAULT_LEVEL);
+    snprintf(level_expected, sizeof(level_expected), "+LEVEL=%u", (unsigned int)LORA_DEFAULT_LEVEL);
 
     /* 定义初始化步骤的AT命令序列 */
     const LORA_ATCommandConfig_t init_commands[] = {
@@ -303,69 +377,69 @@ int LORA_Init(uint32_t baudrate)
             .delay_ms = LORA_AT_RESPONSE_DELAY_LONG,
             .expected_response = "Entry AT",
             .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Step 1: Entering AT mode with +++...\r\n"
+            .compact_log = 1
         },
         {
             .command = "AT\r\n",
             .delay_ms = LORA_AT_RESPONSE_DELAY_NORMAL,
             .expected_response = "OK",
             .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Step 2: Testing communication with AT...\r\n"
+            .compact_log = 1
         },
         {
             .command = "AT+MODE1\r\n",
             .delay_ms = LORA_AT_RESPONSE_DELAY_NORMAL,
             .expected_response = "+MODE=1",
             .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Step 3: Setting transfer mode to MODE=1...\r\n"
+            .compact_log = 1
         },
         {
-            .command = "AT+LEVEL0\r\n",
+            .command = level_cmd,
             .delay_ms = LORA_AT_RESPONSE_DELAY_NORMAL,
-            .expected_response = "+LEVEL=0",
+            .expected_response = level_expected,
             .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Step 4: Setting signal level to LEVEL=0...\r\n"
+            .compact_log = 1
         },
         {
             .command = "AT+MACff,ff\r\n",
             .delay_ms = LORA_AT_RESPONSE_DELAY_NORMAL,
             .expected_response = "+MAC=ff,ff",
             .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Step 5: Setting MAC address to ff,ff...\r\n"
+            .compact_log = 1
         },
         {
             .command = "AT+MAC\r\n",
             .delay_ms = LORA_AT_RESPONSE_DELAY_NORMAL,
             .expected_response = "MAC=ff,ff",
             .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Step 6: Verifying MAC address...\r\n"
+            .compact_log = 1
         },
         {
             .command = "AT+CHANNEL00\r\n",
             .delay_ms = LORA_AT_RESPONSE_DELAY_NORMAL,
             .expected_response = "+CHANNEL=00",
             .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Step 7: Setting CHANNEL to 00...\r\n"
+            .compact_log = 1
         },
         {
             .command = "AT+CHANNEL\r\n",
             .delay_ms = LORA_AT_RESPONSE_DELAY_NORMAL,
             .expected_response = "CHANNEL=00",
             .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Step 8: Verifying CHANNEL...\r\n"
+            .compact_log = 1
         },
         {
             .command = "AT+RESET\r\n",
             .delay_ms = LORA_AT_RESPONSE_DELAY_XLONG,
             .expected_response = "Power on",
+            .allow_no_response = 1,
             .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Step 9: Resetting module to apply configuration...\r\n"
+            .compact_log = 1
         }
     };
 
     /* 执行初始化命令序列 */
     uint8_t num_commands = sizeof(init_commands) / sizeof(init_commands[0]);
-    LORA_DEBUG_LOG("[LORA] Starting initialization sequence...\r\n");
     for(uint8_t i = 0; i < num_commands; i++)
     {
         if(LORA_SendATCommand(&init_commands[i]) != 0)
@@ -387,9 +461,6 @@ int LORA_Init(uint32_t baudrate)
     /* 启动UART接收中断，准备接收LoRa数据（AT+RESET后需要重新启动） */
     HAL_UART_Receive_IT(&huart2, &lora_rx_byte, 1);
 
-#if LORA_DEBUG_VERBOSE
-    LORA_DEBUG_LOG("[LORA] Initialization complete - Ready for communication\r\n");
-#endif
     return 0;  // 成功
 }
 
@@ -399,15 +470,21 @@ int LORA_Init(uint32_t baudrate)
   * @param length: 数据长度
   * @retval 0: 成功, -1: 失败
   */
-int LORA_SendData(uint8_t *data, uint16_t length)
+int LORA_SendData(const uint8_t *data, uint16_t length)
 {
     if(data == NULL || length == 0)
     {
         return -1;  // 参数错误
     }
 
-    /* 使用HAL库发送数据（阻塞模式，超时1000ms） */
-    if(HAL_UART_Transmit(&huart2, data, length, 1000) != HAL_OK)
+    uint32_t timeout_ms = 500U + ((uint32_t)length * 2U);
+    if(timeout_ms > 10000U)
+    {
+        timeout_ms = 10000U;
+    }
+
+    /* 使用长度自适应超时，避免长帧在9600波特率下误超时 */
+    if(HAL_UART_Transmit(&huart2, data, length, timeout_ms) != HAL_OK)
     {
         return -1;  // 发送失败
     }
@@ -420,7 +497,7 @@ int LORA_SendData(uint8_t *data, uint16_t length)
   * @param str: 要发送的字符串（以'\0'结尾）
   * @retval 0: 成功, -1: 失败
   */
-int LORA_SendString(char *str)
+int LORA_SendString(const char *str)
 {
     if(str == NULL)
     {
@@ -467,6 +544,20 @@ int LORA_SendFormattedData(char *data)
     uint8_t send_buffer[LORA_FORMATTED_PACKET_MAX_LEN];
     uint16_t total_size = (uint16_t)(LORA_PACKET_HEADER_LEN + data_len + LORA_PACKET_END_LEN);
 
+    if(total_size > LORA_TX_WIRE_MAX_BYTES)
+    {
+        LORA_DEBUG_CODE(
+            char debug_msg[LORA_DEBUG_MSG_SIZE];
+            snprintf(debug_msg, sizeof(debug_msg),
+                     "[LORA] ERROR: wire packet too long payload=%u wire=%u max=%u\r\n",
+                     (unsigned int)data_len,
+                     (unsigned int)total_size,
+                     (unsigned int)LORA_TX_WIRE_MAX_BYTES);
+            LORA_DEBUG_LOG(debug_msg);
+        );
+        return -1;
+    }
+
     /* 添加头部 0x6a 0x6a 0x4a */
     send_buffer[0] = 0x6a;
     send_buffer[1] = 0x6a;
@@ -477,15 +568,12 @@ int LORA_SendFormattedData(char *data)
     /* 添加结束标识 */
     memcpy(&send_buffer[LORA_PACKET_HEADER_LEN + data_len], LORA_PACKET_END, LORA_PACKET_END_LEN);
 
-    /* 打印调试信息 */
+    /* 打印精简发送摘要，避免长hex刷屏 */
     LORA_DEBUG_CODE(
-        char debug_msg[LORA_DEBUG_MSG_SIZE];
-        int offset = snprintf(debug_msg, sizeof(debug_msg), "[LORA] Sending hex data: ");
-        for(uint16_t i = 0; i < total_size && offset < (int)sizeof(debug_msg) - 4; i++)
-        {
-            offset += snprintf(debug_msg + offset, sizeof(debug_msg) - offset, "%02x ", send_buffer[i]);
-        }
-        snprintf(debug_msg + offset, sizeof(debug_msg) - offset, "\r\n");
+        char debug_msg[96];
+        snprintf(debug_msg, sizeof(debug_msg),
+                 "[LORA TX] bytes=%u, payload=%.32s\r\n",
+                 (unsigned int)total_size, data);
         LORA_DEBUG_LOG(debug_msg);
     );
 
@@ -508,21 +596,22 @@ uint16_t LORA_GetData(uint8_t *buffer, uint16_t max_length)
         return 0;  // 参数错误
     }
 
-    if(!lora_status.data_ready)
+    uint16_t copy_length = 0;
+    uint32_t primask = LORA_EnterCritical();
+    if(lora_status.data_ready)
     {
-        return 0;  // 无数据
+        /* 复制数据到用户缓冲区 */
+        copy_length = (lora_status.rx_length < max_length) ?
+                      lora_status.rx_length : max_length;
+        memcpy(buffer, lora_status.rx_buffer, copy_length);
+
+        /* 清除数据就绪标志 */
+        lora_status.data_ready = 0;
+        lora_status.state = LORA_STATE_IDLE;
+        /* 重置接收长度，避免后续接收追加到旧帧 */
+        lora_status.rx_length = 0;
     }
-
-    /* 复制数据到用户缓冲区 */
-    uint16_t copy_length = (lora_status.rx_length < max_length) ?
-                           lora_status.rx_length : max_length;
-    memcpy(buffer, lora_status.rx_buffer, copy_length);
-
-    /* 清除数据就绪标志 */
-    lora_status.data_ready = 0;
-    lora_status.state = LORA_STATE_IDLE;
-    /* 重置接收长度，避免后续接收追加到旧帧 */
-    lora_status.rx_length = 0;
+    LORA_ExitCritical(primask);
 
     return copy_length;
 }
@@ -533,10 +622,12 @@ uint16_t LORA_GetData(uint8_t *buffer, uint16_t max_length)
   */
 void LORA_ClearBuffer(void)
 {
+    uint32_t primask = LORA_EnterCritical();
     lora_status.rx_length = 0;
     lora_status.data_ready = 0;
     lora_status.state = LORA_STATE_IDLE;
     memset(lora_status.rx_buffer, 0, LORA_RX_BUFFER_SIZE);
+    LORA_ExitCritical(primask);
 }
 
 /**
@@ -604,15 +695,6 @@ int LORA_ExtractPayloadAfterDeviceID(uint8_t *rx_data, uint16_t rx_length,
     memcpy(output_buffer, &rx_data[device_id_len], payload_len);
     output_buffer[payload_len] = '\0';  // 添加字符串结束符
 
-    /* 打印调试信息 */
-    LORA_DEBUG_CODE(
-        char debug_msg[LORA_DEBUG_MSG_SIZE];
-        snprintf(debug_msg, sizeof(debug_msg),
-                 "[LORA] Extracted payload (%d bytes): %s\r\n",
-                 payload_len, output_buffer);
-        LORA_DEBUG_LOG(debug_msg);
-    );
-
     return payload_len;
 }
 
@@ -663,6 +745,10 @@ int LORA_ParseHexStringPacket(uint8_t *rx_data, uint16_t rx_length,
     {
         return -1;
     }
+    if(rx_length < 6U)  /* 至少需要 "6a6a4a" 6 个hex字符 */
+    {
+        return -1;
+    }
 
     /* 打印接收到的原始Hex字符串 */
     LORA_DEBUG_CODE(
@@ -673,14 +759,13 @@ int LORA_ParseHexStringPacket(uint8_t *rx_data, uint16_t rx_length,
         LORA_DEBUG_LOG(debug_msg);
     );
 
-    /* 将Hex字符串转换为字节数组,跳过前导码，查找头部"6a6a4a"或"6A6A4A" */
-    uint8_t converted_data[256];
-    uint16_t converted_len = 0;
+    /* 先查找头部起始位置，随后流式解码，避免256B栈缓冲 */
     uint16_t search_pos = 0;
     uint8_t found_header = 0;
 
     /* 跳过前面的非hex字符，查找"6a6a4a" */
-    while(search_pos < rx_length - 11)  /* 至少需要6个hex字符(3字节)来匹配头部 */
+    uint16_t search_limit = (uint16_t)(rx_length - 6U);
+    while(search_pos <= search_limit)  /* 避免无符号下溢 */
     {
         /* 检查当前位置是否匹配头部 "6a6a4a" 或 "6A6A4A" */
         char c1 = rx_data[search_pos];
@@ -708,9 +793,18 @@ int LORA_ParseHexStringPacket(uint8_t *rx_data, uint16_t rx_length,
         return -1;
     }
 
-    /* 从找到的头部位置开始转换 */
+    const uint8_t header[LORA_PACKET_HEADER_LEN] = {0x6a, 0x6a, 0x4a};
+    uint16_t device_id_len = strlen(device_id);
+    if(device_id_len == 0U)
+    {
+        return -1;
+    }
+
+    /* 从头部起始位置开始流式解码 */
     uint16_t hex_pos = search_pos;
-    while(hex_pos + 1 < rx_length && converted_len < sizeof(converted_data))
+    uint16_t decoded_index = 0;
+    uint16_t payload_len = 0;
+    while(hex_pos + 1U < rx_length)
     {
         /* 跳过非hex字符(如回车换行) */
         if(hex_char_to_value(rx_data[hex_pos]) < 0 ||
@@ -726,71 +820,48 @@ int LORA_ParseHexStringPacket(uint8_t *rx_data, uint16_t rx_length,
 
         if(high >= 0 && low >= 0)
         {
-            converted_data[converted_len++] = (high << 4) | low;
+            uint8_t byte = (uint8_t)((high << 4) | low);
+            if(decoded_index < LORA_PACKET_HEADER_LEN)
+            {
+                if(byte != header[decoded_index])
+                {
+                    LORA_DEBUG_LOG("[LORA] Invalid header in converted data\r\n");
+                    return -1;
+                }
+            }
+            else if(decoded_index < (uint16_t)(LORA_PACKET_HEADER_LEN + device_id_len))
+            {
+                uint16_t id_pos = (uint16_t)(decoded_index - LORA_PACKET_HEADER_LEN);
+                if(byte != (uint8_t)device_id[id_pos])
+                {
+                    LORA_DEBUG_LOG("[LORA] Device ID mismatch\r\n");
+                    return -1;
+                }
+            }
+            else
+            {
+                if(payload_len + 1U >= buffer_size)
+                {
+                    LORA_DEBUG_LOG("[LORA] Output buffer too small\r\n");
+                    return -1;
+                }
+                output_buffer[payload_len++] = (char)byte;
+            }
+            decoded_index++;
         }
 
         hex_pos += 2;
     }
 
-    /* 打印转换后的字节数组 */
-    LORA_DEBUG_CODE(
-        char debug_msg[LORA_DEBUG_MSG_SIZE];
-        int offset = 0;
-        offset += snprintf(debug_msg, sizeof(debug_msg), "[LORA RX] Converted bytes: ");
-        for(uint16_t i = 0; i < converted_len && offset < (int)sizeof(debug_msg) - 3; i++)
-        {
-            offset += snprintf(debug_msg + offset, sizeof(debug_msg) - offset, "%02x ", converted_data[i]);
-        }
-        snprintf(debug_msg + offset, sizeof(debug_msg) - offset, "\r\n");
-        LORA_DEBUG_LOG(debug_msg);
-    );
-
-    /* 检查转换后的数据长度 */
-    uint16_t device_id_len = strlen(device_id);
-    if(converted_len < 3 + device_id_len)
+    /* 检查最小结构：头(3B)+device_id */
+    if(decoded_index < (uint16_t)(LORA_PACKET_HEADER_LEN + device_id_len))
     {
         LORA_DEBUG_LOG("[LORA] Converted data too short\r\n");
         return -1;
     }
-
-    /* 检查头部: 0x6a 0x6a 0x4a */
-    if(converted_data[0] != 0x6a || converted_data[1] != 0x6a || converted_data[2] != 0x4a)
-    {
-        LORA_DEBUG_LOG("[LORA] Invalid header in converted data\r\n");
-        return -1;
-    }
-
-    /* 检查设备ID是否匹配 */
-    if(strncmp((char *)&converted_data[3], device_id, device_id_len) != 0)
-    {
-        LORA_DEBUG_LOG("[LORA] Device ID mismatch\r\n");
-        return -1;
-    }
-
-    /* 计算负载长度 */
-    uint16_t payload_len = converted_len - 3 - device_id_len;
-
-    /* 检查输出缓冲区是否足够 */
-    if(payload_len >= buffer_size)
-    {
-        LORA_DEBUG_LOG("[LORA] Output buffer too small\r\n");
-        return -1;
-    }
-
-    /* 提取负载内容 */
-    memcpy(output_buffer, &converted_data[3 + device_id_len], payload_len);
     output_buffer[payload_len] = '\0';
 
-    /* 打印提取的负载 */
-    LORA_DEBUG_CODE(
-        char debug_msg[LORA_DEBUG_MSG_SIZE];
-        snprintf(debug_msg, sizeof(debug_msg),
-                 "[LORA] Extracted payload (%d bytes): %s\r\n",
-                 payload_len, output_buffer);
-        LORA_DEBUG_LOG(debug_msg);
-    );
-
-    return payload_len;
+    return (int)payload_len;
 }
 
 /**
@@ -800,14 +871,6 @@ int LORA_ParseHexStringPacket(uint8_t *rx_data, uint16_t rx_length,
   */
 void LORA_RxCallback(void)
 {
-    /* 打印接收到的原始数据用于调试 */
-    LORA_DEBUG_CODE(
-        char debug_msg[LORA_DEBUG_MSG_SIZE];
-        snprintf(debug_msg, sizeof(debug_msg),
-                 "[LORA RX IRQ] Received %d bytes\r\n", lora_status.rx_length);
-        LORA_DEBUG_LOG(debug_msg);
-    );
-
     /* 空闲中断可能在无有效字节时触发，直接忽略 */
     if(lora_status.rx_length == 0)
     {
@@ -840,7 +903,11 @@ void LORA_RxCallback(void)
   */
 int __io_putchar(int ch)
 {
+#if (LORA_REDIRECT_STDIO_TO_UART2 == 1)
     HAL_UART_Transmit(&huart2, (uint8_t *)&ch, 1, 1000);
+#else
+    (void)ch;
+#endif
     return ch;
 }
 
@@ -865,8 +932,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if(huart->Instance == USART2)
     {
-        /* 检查缓冲区是否已满 */
-        if(lora_status.rx_length < LORA_RX_BUFFER_SIZE)
+        /* 为NUL终止符预留1字节，最多接收到LORA_RX_BUFFER_SIZE-1 */
+        if(lora_status.rx_length < (LORA_RX_BUFFER_SIZE - 1U))
         {
             /* 存储接收到的字节 */
             lora_status.rx_buffer[lora_status.rx_length++] = lora_rx_byte;
@@ -935,15 +1002,6 @@ int LORA_ParseStringPacket(uint8_t *rx_data, uint16_t rx_length,
     {
         return -1;
     }
-
-    /* 打印接收到的原始字符串 */
-    LORA_DEBUG_CODE(
-        char debug_msg[LORA_DEBUG_MSG_SIZE];
-        snprintf(debug_msg, sizeof(debug_msg),
-                 "[LORA RX] Raw string (%d chars): %.*s\r\n",
-                 rx_length, rx_length, rx_data);
-        LORA_DEBUG_LOG(debug_msg);
-    );
 
     /* 获取设备ID长度 */
     uint16_t device_id_len = strlen(device_id);
@@ -1017,15 +1075,6 @@ int LORA_ParseStringPacket(uint8_t *rx_data, uint16_t rx_length,
     memcpy(output_buffer, &rx_data[payload_start], payload_len);
     output_buffer[payload_len] = '\0';
 
-    /* 打印提取的负载 */
-    LORA_DEBUG_CODE(
-        char debug_msg[LORA_DEBUG_MSG_SIZE];
-        snprintf(debug_msg, sizeof(debug_msg),
-                 "[LORA] Extracted payload (%d bytes): %s\r\n",
-                 payload_len, output_buffer);
-        LORA_DEBUG_LOG(debug_msg);
-    );
-
     return payload_len;
 }
 
@@ -1047,6 +1096,24 @@ int LORA_ConfigureMacAndChannel(char *mac_4chars, char *channel)
     if(mac_4chars == NULL || channel == NULL)
     {
         return -1;
+    }
+    if((strlen(mac_4chars) != 4U) || (strlen(channel) != 2U))
+    {
+        return -1;
+    }
+    for(uint8_t i = 0U; i < 4U; i++)
+    {
+        if(!lora_is_hex_char(mac_4chars[i]))
+        {
+            return -1;
+        }
+    }
+    for(uint8_t i = 0U; i < 2U; i++)
+    {
+        if(!lora_is_hex_char(channel[i]))
+        {
+            return -1;
+        }
     }
 
     /* 构造MAC和CHANNEL命令的期望响应字符串 */
@@ -1071,35 +1138,36 @@ int LORA_ConfigureMacAndChannel(char *mac_4chars, char *channel)
             .delay_ms = LORA_AT_RESPONSE_DELAY_LONG,
             .expected_response = "Entry AT",
             .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Config Step 1: Entering AT mode...\r\n"
+            .compact_log = 1
         },
         {
             .command = "AT\r\n",
             .delay_ms = LORA_AT_RESPONSE_DELAY_NORMAL,
             .expected_response = "OK",
             .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Config Step 2: Testing communication...\r\n"
+            .compact_log = 1
         },
         {
             .command = mac_cmd,
             .delay_ms = LORA_AT_RESPONSE_DELAY_NORMAL,
             .expected_response = mac_expected,
             .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Config Step 3: Setting MAC address...\r\n"
+            .compact_log = 1
         },
         {
             .command = channel_cmd,
             .delay_ms = LORA_AT_RESPONSE_DELAY_NORMAL,
             .expected_response = channel_expected,
             .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Config Step 4: Setting CHANNEL...\r\n"
+            .compact_log = 1
         },
         {
             .command = "AT+RESET\r\n",
             .delay_ms = LORA_AT_RESPONSE_DELAY_XLONG,
             .expected_response = "Power on",
+            .allow_no_response = 1,
             .max_retries = LORA_AT_MAX_RETRIES,
-            .step_name = "[LORA] Config Step 5: Resetting module...\r\n"
+            .compact_log = 1
         }
     };
 
@@ -1114,6 +1182,5 @@ int LORA_ConfigureMacAndChannel(char *mac_4chars, char *channel)
         }
     }
 
-    LORA_DEBUG_LOG("[LORA] MAC and CHANNEL configured successfully\r\n");
     return 0;
 }

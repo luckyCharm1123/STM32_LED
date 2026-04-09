@@ -48,16 +48,23 @@
 #include "state_sender.h"
 #include "sound_accumulator.h"
 #include "deferred_action.h"
+#include "ir_learner.h"
+#include "BLUE_LED.h"
 
 /* USER CODE BEGIN PV */
 /* 用户代码开始：私有变量 */
 
-UART_HandleTypeDef huart1;  // USART1句柄，用于调试输出（PA9/PA10，115200）
+UART_HandleTypeDef huart1;  // USART1句柄，用于红外学习模块（PA9/PA10）
 UART_HandleTypeDef huart2;  // USART2句柄，用于LoRa通信（PA2/PA3，9600/115200）
 UART_HandleTypeDef huart3;  // USART3句柄，用于毫米波雷达通信（PB10/PB11，115200）
 DMA_HandleTypeDef hdma_usart3_rx;  // USART3接收DMA句柄
 
-/* 动态WiFi配置变量 */
+/* 动态WiFi配置变量
+ * 并发语义说明：
+ * - 本组变量仅在主循环调用链内访问（含main.c内普通函数）。
+ * - 中断上下文不直接读写本组变量；ISR共享状态在各模块内单独维护（如lora_status/g_cap）。
+ * 因此这里不使用volatile，避免不必要的优化抑制。
+ */
 char g_device_code[9];  // 全局设备码，8位十六进制 + 结束符
 static char g_lora_mac[5] = {0};      // 保存配置后的MAC(4字符)
 static char g_lora_channel[3] = {0};  // 保存配置后的CHANNEL(2字符)
@@ -70,6 +77,13 @@ static uint32_t g_last_config_request_time = 0;  // 上次发送配置请求的�
 static uint32_t g_config_retry_interval_ms = 5000;  // 配置请求重试间隔（退避）
 static uint32_t g_config_retry_jitter_ms = 0;  // 配置请求抖动，避免固定相位冲突
 static uint8_t g_config_request_count = 0;   // 已发送配置请求次数（用于失败后重置LoRa）
+static uint32_t g_ir_chunk_msg_counter = 0;  // IR分包消息计数器（用于生成msgId）
+static uint8_t g_irbind_pause_active = 0;    // IRBIND分包接收期间暂停业务上报
+static uint8_t g_irlearn_tx_pause_active = 0; // IR学习分包上传期间暂停业务上报
+static uint8_t g_irlearn_chunk_ack_waiting = 0;
+static uint8_t g_irlearn_chunk_ack_received = 0;
+static uint32_t g_irlearn_chunk_ack_msg_id = 0;
+static uint16_t g_irlearn_chunk_ack_seg = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -81,13 +95,18 @@ static void MX_USART3_UART_Init(void); // USART3初始化函数声明（雷达�
 
 /* USER CODE BEGIN PFP */
 /* 用户代码开始：私有函数原型 */
-void DEBUG_SendString(const char *str);    // USART1调试串口发送函数原型
+void DEBUG_SendString(const char *str);    // ITM/SWO调试输出函数原型
 void Get_STM32_UID(char *uid_str);         // 获取STM32芯片唯一ID
 void Generate_Device_Code(char *device_code);  // 生成8位设备码
 uint8_t Process_Sensor_Status(uint8_t *last_combined_state);  // 处理传感器状态并返回综合状态
 static void LORA_ReinitAndConfig(void);    // 重初始化LoRa并进入未配置重连态
 static void StrToUpper(char *str);         // 字符串转大写(就地)
 static void StateSender_ReportRelayActionOnce(void);    // 继电器动作后立即上报一次
+static void StateSender_ReportIrLearnEnterOnce(void);   // IR进入学习模式后立即上报一次
+static int StateSender_ReportIrLearnFrameText(const uint8_t *frame, uint16_t frame_len); // IR学习完成帧文本上报（HEX）
+static uint8_t IRBind_HandlePayload(const char *payload);
+static uint8_t IRLearn_HandleChunkAck(const char *payload);
+static uint8_t IRLearn_WaitChunkAck(uint32_t timeout_ms);
 static void LORA_RearmRxIT(void);                       // 重启LoRa串口接收中断（带容错）
 static uint32_t LORA_NextConfigRetryJitterMs(void);     // 生成配置重试抖动
 void LORA_MarkUplinkAndTrackGetdata(void);              // 记录一次上报并跟踪Getdata应答
@@ -95,17 +114,159 @@ static void LORA_HandleGetDataAck(uint8_t *batch_guard); // 处理getData应答�
 static void LORA_ApplyConfigSuccess(const char *mac, const char *channel);
 static void LORA_ProcessDeferredAction(void);
 static void MainLoop_Idle(void);                        // 主循环空闲等待（事件唤醒）
+static void Main_CheckConfigRetry(void);
+static void Main_ProcessRadarAndIr(uint8_t *last_ir_learning);
+static void Main_HandleLoRaDownlink(void);
+static void Main_RunPeriodicTasks(uint32_t *last_sensor_output_time,
+                                  uint8_t *last_radar_has_person,
+                                  uint32_t sensor_output_interval);
 void LORA_WaitHook(void);                                // LoRa等待阶段协作任务钩子
 /**
-  * @brief USART1发送调试信息
+  * @brief 初始化ITM/SWV调试输出
+  * @retval None
+  * @details 启用CoreSight ITM，通过SWO引脚输出调试信息，不占用UART
+  */
+static void ITM_SWV_Init(void)
+{
+  /* 使能AFIO时钟，用于SWO引脚重映射 */
+  __HAL_RCC_AFIO_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  /* 释放JTAG引脚(PB3/PB4/PA15)，保留SWD(PA13/PA14) */
+  /* PB3是JTDO/SWO复用引脚，必须释放JTAG才能用作SWO输出 */
+  __HAL_AFIO_REMAP_SWJ_NOJTAG();
+
+  /* 使能DWT和ITM跟踪 */
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+
+  /* 使能调试模式下TRACE引脚输出 */
+  DBGMCU->CR |= DBGMCU_CR_TRACE_IOEN;
+
+  /* 解锁ITM和TPIU寄存器 */
+  ITM->LAR = 0xC5ACCE55U;
+#if defined(TPI_LAR)
+  TPI->LAR = 0xC5ACCE55U;
+#endif
+
+  /* 配置TPIU：SWO输出频率 = HCLK / (ACPR + 1) */
+  {
+    const uint32_t swo_hz = 2000000U;
+    uint32_t hclk = HAL_RCC_GetHCLKFreq();
+    if(hclk < swo_hz)
+    {
+      hclk = swo_hz;
+    }
+    TPI->ACPR = (hclk / swo_hz) - 1U;
+  }
+
+  /* TPIU使用UART输出模式 */
+  TPI->SPPR = 0x02U;  /* 协议: 0=sync, 1=manchester, 2=UART(NRZ) */
+  TPI->FFCR = 0x00U;  /* 禁用formatter */
+
+  /* 禁用ITM先进行配置 */
+  ITM->TCR = 0;
+
+  /* 使能stimulus端口0 */
+  ITM->TER = 0x01UL;
+
+  /* 所有端口非特权可访问 */
+  ITM->TPR = 0x00UL;
+
+  /* 使能ITM（最小配置，兼容st-trace） */
+  ITM->TCR = ITM_TCR_ITMENA_Msk;
+}
+
+/**
+  * @brief 通过semihosting发送字符串（需调试器支持）
+  * @param str: 要发送的字符串
+  * @retval None
+  */
+#if DEBUG_SEMIHOSTING_FALLBACK
+static void Semihosting_SendString(const char *str)
+{
+  register uint32_t operation asm("r0") = 0x04U; /* SYS_WRITE0 */
+  register const char *parameter asm("r1") = str;
+  __asm volatile ("bkpt 0xAB" : : "r" (operation), "r" (parameter) : "memory");
+}
+#endif
+
+/**
+  * @brief 检查ITM通道0是否可用
+  * @retval 1: 可用, 0: 不可用
+  */
+static uint8_t ITM_IsPort0Enabled(void)
+{
+  if((CoreDebug->DEMCR & CoreDebug_DEMCR_TRCENA_Msk) == 0U)
+  {
+    return 0U;
+  }
+  if((ITM->TCR & ITM_TCR_ITMENA_Msk) == 0U)
+  {
+    return 0U;
+  }
+  if((ITM->TER & 0x01UL) == 0U)
+  {
+    return 0U;
+  }
+  return 1U;
+}
+
+/**
+  * @brief 通过ITM通道0发送单字符（有界等待，不阻塞主流程）
+  * @param ch: 字符
+  * @retval None
+  */
+static void ITM_SendCharNonBlocking(uint8_t ch)
+{
+  /* 避免在FIFO异常状态下无限等待。 */
+  uint32_t timeout = 10000U;
+  while((ITM->PORT[0U].u32 == 0UL) && (timeout > 0U))
+  {
+    timeout--;
+  }
+
+  if(timeout == 0U)
+  {
+    return;
+  }
+
+  ITM->PORT[0U].u8 = ch;
+}
+
+/**
+  * @brief 通过ITM/SWV发送调试信息
   * @param str: 要发送的调试字符串，以'\0'结尾
   * @retval None
-  * @details USART1专用调试串口，配置在PA9(TX)/PA10(RX)
-  *          波特率115200，用于输出系统调试信息
+  * @details 通过SWO引脚输出，不占用任何UART，需ST-Link连接并启用SWV
   */
 void DEBUG_SendString(const char *str)
 {
-  HAL_UART_Transmit(&huart1, (uint8_t*)str, strlen(str), HAL_MAX_DELAY);
+  if(str == NULL)
+  {
+    return;
+  }
+
+#if DEBUG_SEMIHOSTING_FALLBACK
+  /* 调试期优先走semihosting，便于在GDB控制台直接看日志。 */
+  if((CoreDebug->DHCSR & CoreDebug_DHCSR_C_DEBUGEN_Msk) != 0U)
+  {
+    Semihosting_SendString(str);
+    return;
+  }
+#endif
+
+  /* 优先走ITM/SWV：这是本工程默认调试输出通道。 */
+  if(ITM_IsPort0Enabled() != 0U)
+  {
+    while(*str != '\0')
+    {
+      ITM_SendCharNonBlocking((uint8_t)(*str));
+      str++;
+    }
+    return;
+  }
+
+  /* ITM不可用且semihosting未启用时，静默丢弃日志。 */
 }
 
 void LORA_WaitHook(void)
@@ -114,6 +275,12 @@ void LORA_WaitHook(void)
   SoundAccumulator_Update();
   StateSender_BackgroundTick();
   RADAR_Process();
+  IR_Process();
+}
+
+void IR_DebugSendString(const char *str)
+{
+  DEBUG_SendString(str);
 }
 
 /**
@@ -149,6 +316,766 @@ static void StateSender_ReportRelayActionOnce(void)
   }
 
   (void)StateSender_SendFastImmediate();
+}
+
+/**
+  * @brief IR进入学习模式后立即上报一次事件
+  * @retval None
+  */
+static void StateSender_ReportIrLearnEnterOnce(void)
+{
+  if(!g_lora_configured)
+  {
+    return;
+  }
+
+  char payload[40];
+  snprintf(payload, sizeof(payload), "dev_%sIRLEARN_1", g_device_code);
+
+  if(LORA_SendFormattedData(payload) == 0)
+  {
+    LORA_MarkUplinkAndTrackGetdata();
+  }
+}
+
+/* IR学习帧分包发送策略：单片失败即整条失败，避免云端收到半包 */
+#define IR_LEARN_CHUNK_MAX_RETRY      3U
+#define IR_LEARN_CHUNK_RETRY_DELAY_MS 30U
+#define IR_LEARN_CHUNK_TOTAL_MAX      999U
+#define IR_LEARN_CHUNK_ACK_TIMEOUT_MS 5000U
+#define IR_LEARN_CHUNK_SEND_GAP_MS    100U
+
+#define IRBIND_SESSION_ID_MAX_LEN     32U
+#define IRBIND_MAX_SEGMENTS           128U
+#define IRBIND_MAX_DATA_LEN           IR_CODE_DATA_MAX_LEN
+#define IRBIND_MAX_HEX_LEN            (IRBIND_MAX_DATA_LEN * 2U)
+#define IRBIND_SEG_BITMAP_BYTES       ((IRBIND_MAX_SEGMENTS + 7U) / 8U)
+
+typedef struct
+{
+  uint8_t active;
+  uint8_t slot;
+  uint16_t total_len;
+  uint16_t total_seg;
+  char session_id[IRBIND_SESSION_ID_MAX_LEN + 1U];
+  uint16_t seg_len[IRBIND_MAX_SEGMENTS];
+  uint16_t seg_start[IRBIND_MAX_SEGMENTS];
+  uint8_t seg_received_bitmap[IRBIND_SEG_BITMAP_BYTES];
+  uint16_t received_seg_count;
+  uint16_t seg_pool_used;
+  char seg_pool[IRBIND_MAX_HEX_LEN + 1U];
+} IRBindContext_t;
+
+static IRBindContext_t g_irbind_ctx;
+
+static void IRBind_ResetContext(void)
+{
+  memset(&g_irbind_ctx, 0, sizeof(g_irbind_ctx));
+}
+
+static void IRBind_AbortSession(void)
+{
+  IRBind_ResetContext();
+  g_irbind_pause_active = 0U;
+}
+
+static int IRBind_HexNibble(char ch)
+{
+  if(ch >= '0' && ch <= '9')
+  {
+    return (int)(ch - '0');
+  }
+  if(ch >= 'A' && ch <= 'F')
+  {
+    return (int)(ch - 'A' + 10);
+  }
+  if(ch >= 'a' && ch <= 'f')
+  {
+    return (int)(ch - 'a' + 10);
+  }
+  return -1;
+}
+
+static uint8_t IRBind_ParseUInt32(const char *str, uint32_t *out)
+{
+  uint32_t value = 0U;
+  const char *p = str;
+
+  if(str == NULL || out == NULL || *str == '\0')
+  {
+    return 0U;
+  }
+
+  while(*p != '\0')
+  {
+    uint32_t digit = 0U;
+    if(*p < '0' || *p > '9')
+    {
+      return 0U;
+    }
+    digit = (uint32_t)(*p - '0');
+    if(value > (UINT32_MAX - digit) / 10U)
+    {
+      return 0U;
+    }
+    value = (value * 10U) + digit;
+    p++;
+  }
+
+  *out = value;
+  return 1U;
+}
+
+static uint8_t IRBind_IsSegReceived(uint16_t idx0)
+{
+  uint16_t byte_idx = (uint16_t)(idx0 / 8U);
+  uint8_t bit_mask = (uint8_t)(1U << (idx0 % 8U));
+  return (g_irbind_ctx.seg_received_bitmap[byte_idx] & bit_mask) ? 1U : 0U;
+}
+
+static void IRBind_SetSegReceived(uint16_t idx0)
+{
+  uint16_t byte_idx = (uint16_t)(idx0 / 8U);
+  uint8_t bit_mask = (uint8_t)(1U << (idx0 % 8U));
+  g_irbind_ctx.seg_received_bitmap[byte_idx] =
+      (uint8_t)(g_irbind_ctx.seg_received_bitmap[byte_idx] | bit_mask);
+}
+
+static uint32_t IR_NextChunkMsgId(void)
+{
+  g_ir_chunk_msg_counter++;
+  return (HAL_GetTick() ^ (g_ir_chunk_msg_counter * 0x9E3779B9u));
+}
+
+static uint8_t IRLearn_ParseHexU32(const char *str, uint32_t *out)
+{
+  uint32_t value = 0U;
+  const char *p = str;
+
+  if(str == NULL || out == NULL || *str == '\0')
+  {
+    return 0U;
+  }
+
+  while(*p != '\0')
+  {
+    uint8_t ch = (uint8_t)*p;
+    uint8_t digit = 0U;
+    if(ch >= '0' && ch <= '9')
+    {
+      digit = (uint8_t)(ch - '0');
+    }
+    else if(ch >= 'A' && ch <= 'F')
+    {
+      digit = (uint8_t)(ch - 'A' + 10U);
+    }
+    else if(ch >= 'a' && ch <= 'f')
+    {
+      digit = (uint8_t)(ch - 'a' + 10U);
+    }
+    else
+    {
+      return 0U;
+    }
+
+    if(value > (UINT32_MAX - digit) / 16U)
+    {
+      return 0U;
+    }
+    value = (value * 16U) + digit;
+    p++;
+  }
+
+  *out = value;
+  return 1U;
+}
+
+static uint8_t IRLearn_HandleChunkAck(const char *payload)
+{
+  const char *prefix = "IR23_ACK_M";
+  const char *msg_start = NULL;
+  const char *seg_start = NULL;
+  const char *sep = NULL;
+  char msg_buf[16];
+  char seg_buf[12];
+  uint32_t msg_id = 0U;
+  uint32_t seg_u32 = 0U;
+
+  if(payload == NULL)
+  {
+    return 0U;
+  }
+
+  {
+    size_t prefix_len = strlen(prefix);
+    if(strlen(payload) < prefix_len)
+    {
+      return 0U;
+    }
+    for(size_t i = 0U; i < prefix_len; i++)
+    {
+      char ch = payload[i];
+      if(ch >= 'a' && ch <= 'z')
+      {
+        ch = (char)(ch - ('a' - 'A'));
+      }
+      if(ch != prefix[i])
+      {
+        return 0U;
+      }
+    }
+  }
+
+  msg_start = payload + strlen(prefix);
+  sep = strstr(msg_start, "_S");
+  if(sep == NULL || sep == msg_start)
+  {
+    return 1U;
+  }
+
+  if((size_t)(sep - msg_start) >= sizeof(msg_buf))
+  {
+    return 1U;
+  }
+  memcpy(msg_buf, msg_start, (size_t)(sep - msg_start));
+  msg_buf[sep - msg_start] = '\0';
+
+  seg_start = sep + 2;
+  if(*seg_start == '\0' || strlen(seg_start) >= sizeof(seg_buf))
+  {
+    return 1U;
+  }
+  memcpy(seg_buf, seg_start, strlen(seg_start) + 1U);
+
+  if(IRLearn_ParseHexU32(msg_buf, &msg_id) == 0U ||
+     IRBind_ParseUInt32(seg_buf, &seg_u32) == 0U ||
+     seg_u32 == 0U || seg_u32 > UINT16_MAX)
+  {
+    return 1U;
+  }
+
+  if(g_irlearn_chunk_ack_waiting &&
+     g_irlearn_chunk_ack_msg_id == msg_id &&
+     g_irlearn_chunk_ack_seg == (uint16_t)seg_u32)
+  {
+    g_irlearn_chunk_ack_received = 1U;
+    g_irlearn_chunk_ack_waiting = 0U;
+  }
+
+  return 1U;
+}
+
+static uint8_t IRLearn_WaitChunkAck(uint32_t timeout_ms)
+{
+  uint32_t start = HAL_GetTick();
+
+  while((HAL_GetTick() - start) < timeout_ms)
+  {
+    if(g_irlearn_chunk_ack_received)
+    {
+      return 1U;
+    }
+
+    Main_HandleLoRaDownlink();
+    LORA_ProcessDeferredAction();
+    HAL_Delay(10);
+  }
+
+  return g_irlearn_chunk_ack_received ? 1U : 0U;
+}
+
+static size_t IR_CalcHexChunkCapacity(uint32_t msg_id, uint32_t seq, uint32_t total, uint16_t raw_len)
+{
+  char prefix[96];
+  int prefix_len = snprintf(prefix, sizeof(prefix),
+                            "dev_%sIR23_RAW_%u_HEX_M%08" PRIX32 "_S%lu_T%lu_",
+                            g_device_code,
+                            (unsigned int)raw_len,
+                            msg_id,
+                            (unsigned long)seq,
+                            (unsigned long)total);
+  if(prefix_len < 0)
+  {
+    return 0U;
+  }
+
+  if((size_t)prefix_len >= LORA_FORMATTED_PAYLOAD_WIRE_MAX)
+  {
+    return 0U;
+  }
+
+  return (LORA_FORMATTED_PAYLOAD_WIRE_MAX - (size_t)prefix_len);
+}
+
+/**
+  * @brief IR学习完成后文本上报原始帧（HEX）
+  * @param frame: 原始IR帧
+  * @param frame_len: 原始IR帧长度
+  * @retval 0: 成功, -1: 失败
+  */
+static int StateSender_ReportIrLearnFrameText(const uint8_t *frame, uint16_t frame_len)
+{
+  if(frame == NULL || frame_len == 0U)
+  {
+    return -1;
+  }
+
+  if(!g_lora_configured)
+  {
+    LORA_DEBUG_LOG("[IR] Skip learn uplink: LoRa not configured\r\n");
+    return -1;
+  }
+
+  static char payload[LORA_FORMATTED_PAYLOAD_WIRE_MAX + 1U];
+  static const char hex_lut[] = "0123456789ABCDEF";
+  const size_t hex_total_len = (size_t)frame_len * 2U;
+
+  uint32_t msg_id = IR_NextChunkMsgId();
+  uint32_t total = 1U;
+  uint32_t prev_total = 0U;
+  size_t worst_chunk_hex_cap = 0U;
+
+  for(uint8_t iter = 0U; iter < 8U; iter++)
+  {
+    worst_chunk_hex_cap = IR_CalcHexChunkCapacity(msg_id, total, total, frame_len);
+    if((worst_chunk_hex_cap & 1U) != 0U)
+    {
+      worst_chunk_hex_cap--;
+    }
+    if(worst_chunk_hex_cap == 0U)
+    {
+      LORA_DEBUG_LOG("[IR] Learn frame chunk capacity invalid\r\n");
+      return -1;
+    }
+
+    prev_total = total;
+    total = (uint32_t)((hex_total_len + worst_chunk_hex_cap - 1U) / worst_chunk_hex_cap);
+    if(total == 0U)
+    {
+      total = 1U;
+    }
+    if(total > IR_LEARN_CHUNK_TOTAL_MAX)
+    {
+      LORA_DEBUG_LOG("[IR] Learn frame chunk total too large\r\n");
+      return -1;
+    }
+    if(total == prev_total)
+    {
+      break;
+    }
+  }
+
+  worst_chunk_hex_cap = IR_CalcHexChunkCapacity(msg_id, total, total, frame_len);
+  if((worst_chunk_hex_cap & 1U) != 0U)
+  {
+    worst_chunk_hex_cap--;
+  }
+  if(worst_chunk_hex_cap == 0U)
+  {
+    LORA_DEBUG_LOG("[IR] Learn frame chunk capacity final invalid\r\n");
+    return -1;
+  }
+
+  LORA_DEBUG_CODE(
+    char pre_msg[144];
+    snprintf(pre_msg, sizeof(pre_msg),
+             "[IR] Learn frame text uplink raw=%u hex=%u msg=%08" PRIX32 " total=%lu cap=%u\r\n",
+             (unsigned int)frame_len,
+             (unsigned int)hex_total_len,
+             msg_id,
+             (unsigned long)total,
+             (unsigned int)worst_chunk_hex_cap);
+    LORA_DEBUG_LOG(pre_msg);
+  );
+
+  size_t hex_pos = 0U;
+  g_irlearn_tx_pause_active = 1U;
+  for(uint32_t seq = 1U; seq <= total; seq++)
+  {
+    size_t chunk_hex_len = hex_total_len - hex_pos;
+    if(chunk_hex_len > worst_chunk_hex_cap)
+    {
+      chunk_hex_len = worst_chunk_hex_cap;
+    }
+
+    int prefix_len = snprintf(payload, sizeof(payload),
+                              "dev_%sIR23_RAW_%u_HEX_M%08" PRIX32 "_S%lu_T%lu_",
+                              g_device_code,
+                              (unsigned int)frame_len,
+                              msg_id,
+                              (unsigned long)seq,
+                              (unsigned long)total);
+    if(prefix_len < 0)
+    {
+      LORA_DEBUG_LOG("[IR] Learn frame chunk prefix build failed\r\n");
+      g_irlearn_tx_pause_active = 0U;
+      return -1;
+    }
+    if((size_t)prefix_len + chunk_hex_len >= sizeof(payload))
+    {
+      LORA_DEBUG_LOG("[IR] Learn frame chunk payload overflow\r\n");
+      g_irlearn_tx_pause_active = 0U;
+      return -1;
+    }
+
+    size_t frame_offset = hex_pos / 2U;
+    size_t chunk_bytes = chunk_hex_len / 2U;
+    for(size_t i = 0U; i < chunk_bytes; i++)
+    {
+      uint8_t b = frame[frame_offset + i];
+      payload[(size_t)prefix_len + (i * 2U)] = hex_lut[(b >> 4U) & 0x0FU];
+      payload[(size_t)prefix_len + (i * 2U) + 1U] = hex_lut[b & 0x0FU];
+    }
+    payload[(size_t)prefix_len + chunk_hex_len] = '\0';
+
+    size_t wire_bytes = LORA_FORMATTED_WIRE_OVERHEAD + (size_t)prefix_len + chunk_hex_len;
+    if(wire_bytes > LORA_TX_WIRE_MAX_BYTES)
+    {
+      LORA_DEBUG_LOG("[IR] Learn frame chunk wire overflow\r\n");
+      g_irlearn_tx_pause_active = 0U;
+      return -1;
+    }
+
+    int sent = 0;
+    for(uint8_t attempt = 0U; attempt < IR_LEARN_CHUNK_MAX_RETRY; attempt++)
+    {
+      if(LORA_SendFormattedData(payload) == 0)
+      {
+        g_irlearn_chunk_ack_msg_id = msg_id;
+        g_irlearn_chunk_ack_seg = (uint16_t)seq;
+        g_irlearn_chunk_ack_waiting = 1U;
+        g_irlearn_chunk_ack_received = 0U;
+        if(IRLearn_WaitChunkAck(IR_LEARN_CHUNK_ACK_TIMEOUT_MS))
+        {
+          sent = 1;
+          break;
+        }
+      }
+      g_irlearn_chunk_ack_waiting = 0U;
+      g_irlearn_chunk_ack_received = 0U;
+      HAL_Delay(IR_LEARN_CHUNK_RETRY_DELAY_MS * (uint32_t)(attempt + 1U));
+    }
+
+    if(!sent)
+    {
+      LORA_DEBUG_CODE(
+        char fail_msg[128];
+        snprintf(fail_msg, sizeof(fail_msg),
+                 "[IR] Learn frame chunk send failed msg=%08" PRIX32 " seq=%lu/%lu\r\n",
+                 msg_id, (unsigned long)seq, (unsigned long)total);
+        LORA_DEBUG_LOG(fail_msg);
+      );
+      g_irlearn_tx_pause_active = 0U;
+      return -1;
+    }
+
+    hex_pos += chunk_hex_len;
+    if(seq < total)
+    {
+      HAL_Delay(IR_LEARN_CHUNK_SEND_GAP_MS);
+    }
+  }
+
+  if(hex_pos != hex_total_len)
+  {
+    LORA_DEBUG_LOG("[IR] Learn frame chunk send length mismatch\r\n");
+    g_irlearn_tx_pause_active = 0U;
+    return -1;
+  }
+
+  g_irlearn_tx_pause_active = 0U;
+  LORA_MarkUplinkAndTrackGetdata();
+  LORA_DEBUG_CODE(
+    char done_msg[144];
+    snprintf(done_msg, sizeof(done_msg),
+             "[IR] Learn frame text uplink done raw=%u hex=%u msg=%08" PRIX32 " total=%lu\r\n",
+             (unsigned int)frame_len,
+             (unsigned int)hex_total_len,
+             msg_id,
+             (unsigned long)total);
+    LORA_DEBUG_LOG(done_msg);
+  );
+  return 0;
+}
+
+static uint8_t IRBind_HandlePayload(const char *payload)
+{
+  const char *prefix = "IRBIND_";
+  const size_t prefix_len = 7U;
+  const char *p = payload;
+  const char *sep = NULL;
+  const char *seg_data = NULL;
+  char token_buf[48];
+  char session_buf[IRBIND_SESSION_ID_MAX_LEN + 1U];
+  uint32_t slot_u32 = 0U;
+  uint32_t total_len_u32 = 0U;
+  uint32_t seg_index_u32 = 0U;
+  uint32_t total_seg_u32 = 0U;
+  uint16_t seg_index = 0U;
+  uint16_t total_seg = 0U;
+  uint16_t seg_hex_len = 0U;
+
+  if(payload == NULL)
+  {
+    return 0U;
+  }
+
+  if(strncmp(payload, prefix, prefix_len) != 0)
+  {
+    return 0U;
+  }
+
+  DEBUG_SendString("[IRBIND] segment rx\r\n");
+  LORA_DEBUG_CODE(
+    char irbind_rx_dbg[200];
+    snprintf(irbind_rx_dbg, sizeof(irbind_rx_dbg),
+             "[IRBIND] payload=%.160s\r\n", payload);
+    LORA_DEBUG_LOG(irbind_rx_dbg);
+  );
+
+  p += prefix_len;
+
+  /* SLOT */
+  sep = strchr(p, '_');
+  if(sep == NULL || sep == p || (size_t)(sep - p) >= sizeof(token_buf))
+  {
+    return 1U;
+  }
+  memcpy(token_buf, p, (size_t)(sep - p));
+  token_buf[sep - p] = '\0';
+  if(IRBind_ParseUInt32(token_buf, &slot_u32) == 0U)
+  {
+    return 1U;
+  }
+  p = sep + 1;
+
+  /* TOTAL_LENGTH */
+  sep = strchr(p, '_');
+  if(sep == NULL || sep == p || (size_t)(sep - p) >= sizeof(token_buf))
+  {
+    return 1U;
+  }
+  memcpy(token_buf, p, (size_t)(sep - p));
+  token_buf[sep - p] = '\0';
+  if(IRBind_ParseUInt32(token_buf, &total_len_u32) == 0U)
+  {
+    return 1U;
+  }
+  p = sep + 1;
+
+  /* SESSION_ID */
+  sep = strchr(p, '_');
+  if(sep == NULL || sep == p || (size_t)(sep - p) > IRBIND_SESSION_ID_MAX_LEN)
+  {
+    return 1U;
+  }
+  memcpy(session_buf, p, (size_t)(sep - p));
+  session_buf[sep - p] = '\0';
+  p = sep + 1;
+
+  /* S{n} */
+  sep = strchr(p, '_');
+  if(sep == NULL || sep == p || p[0] != 'S' || (size_t)(sep - p) < 2U || (size_t)(sep - p) >= sizeof(token_buf))
+  {
+    return 1U;
+  }
+  memcpy(token_buf, &p[1], (size_t)(sep - p - 1U));
+  token_buf[sep - p - 1U] = '\0';
+  if(IRBind_ParseUInt32(token_buf, &seg_index_u32) == 0U)
+  {
+    return 1U;
+  }
+  p = sep + 1;
+
+  /* T{total} */
+  sep = strchr(p, '_');
+  if(sep == NULL || sep == p || p[0] != 'T' || (size_t)(sep - p) < 2U || (size_t)(sep - p) >= sizeof(token_buf))
+  {
+    return 1U;
+  }
+  memcpy(token_buf, &p[1], (size_t)(sep - p - 1U));
+  token_buf[sep - p - 1U] = '\0';
+  if(IRBind_ParseUInt32(token_buf, &total_seg_u32) == 0U)
+  {
+    return 1U;
+  }
+  seg_data = sep + 1;
+
+  if(slot_u32 == 0U || slot_u32 > IR_STORAGE_SLOT_COUNT)
+  {
+    DEBUG_SendString("[IRBIND] invalid slot\r\n");
+    return 1U;
+  }
+  if(total_len_u32 == 0U || total_len_u32 > IRBIND_MAX_DATA_LEN)
+  {
+    DEBUG_SendString("[IRBIND] invalid total_len\r\n");
+    return 1U;
+  }
+  if(total_seg_u32 == 0U || total_seg_u32 > IRBIND_MAX_SEGMENTS)
+  {
+    DEBUG_SendString("[IRBIND] invalid total_seg\r\n");
+    return 1U;
+  }
+  if(seg_index_u32 == 0U || seg_index_u32 > total_seg_u32)
+  {
+    DEBUG_SendString("[IRBIND] invalid seg index\r\n");
+    return 1U;
+  }
+
+  seg_hex_len = (uint16_t)strlen(seg_data);
+  if(seg_hex_len == 0U || (seg_hex_len & 1U) != 0U)
+  {
+    DEBUG_SendString("[IRBIND] invalid seg hex len\r\n");
+    return 1U;
+  }
+  for(uint16_t i = 0U; i < seg_hex_len; i++)
+  {
+    if(IRBind_HexNibble(seg_data[i]) < 0)
+    {
+      return 1U;
+    }
+  }
+
+  seg_index = (uint16_t)seg_index_u32;
+  total_seg = (uint16_t)total_seg_u32;
+
+  if(g_irbind_ctx.active == 0U ||
+     g_irbind_ctx.slot != (uint8_t)slot_u32 ||
+     strcmp(g_irbind_ctx.session_id, session_buf) != 0)
+  {
+    IRBind_ResetContext();
+    g_irbind_ctx.active = 1U;
+    g_irbind_ctx.slot = (uint8_t)slot_u32;
+    g_irbind_ctx.total_len = (uint16_t)total_len_u32;
+    g_irbind_ctx.total_seg = total_seg;
+    strncpy(g_irbind_ctx.session_id, session_buf, IRBIND_SESSION_ID_MAX_LEN);
+    g_irbind_ctx.session_id[IRBIND_SESSION_ID_MAX_LEN] = '\0';
+    g_irbind_pause_active = 1U;
+    DEBUG_SendString("[IRBIND] pause uplink on first segment\r\n");
+  }
+
+  if(g_irbind_ctx.total_len != (uint16_t)total_len_u32 || g_irbind_ctx.total_seg != total_seg)
+  {
+    DEBUG_SendString("[IRBIND] total mismatch with active context\r\n");
+    IRBind_AbortSession();
+    return 1U;
+  }
+
+  {
+    uint16_t idx0 = (uint16_t)(seg_index - 1U);
+    if(IRBind_IsSegReceived(idx0) == 0U)
+    {
+      if((uint32_t)g_irbind_ctx.seg_pool_used + (uint32_t)seg_hex_len > (uint32_t)IRBIND_MAX_HEX_LEN)
+      {
+        DEBUG_SendString("[IRBIND] seg pool overflow\r\n");
+        IRBind_AbortSession();
+        return 1U;
+      }
+      g_irbind_ctx.seg_start[idx0] = g_irbind_ctx.seg_pool_used;
+      g_irbind_ctx.seg_len[idx0] = seg_hex_len;
+      memcpy(&g_irbind_ctx.seg_pool[g_irbind_ctx.seg_pool_used], seg_data, seg_hex_len);
+      g_irbind_ctx.seg_pool_used = (uint16_t)(g_irbind_ctx.seg_pool_used + seg_hex_len);
+      IRBind_SetSegReceived(idx0);
+      g_irbind_ctx.received_seg_count++;
+    }
+    else
+    {
+      uint16_t old_len = g_irbind_ctx.seg_len[idx0];
+      uint16_t old_start = g_irbind_ctx.seg_start[idx0];
+      if(old_len != seg_hex_len)
+      {
+        DEBUG_SendString("[IRBIND] duplicate seg len mismatch\r\n");
+        IRBind_AbortSession();
+        return 1U;
+      }
+      memcpy(&g_irbind_ctx.seg_pool[old_start], seg_data, seg_hex_len);
+    }
+  }
+
+  {
+    char seg_ack_msg[112];
+    int seg_ack_len = snprintf(seg_ack_msg, sizeof(seg_ack_msg),
+                               "dev_%sIRBINDACK_%u_%s_S%u",
+                               g_device_code,
+                               (unsigned int)g_irbind_ctx.slot,
+                               g_irbind_ctx.session_id,
+                               (unsigned int)seg_index);
+    if(seg_ack_len > 0 && (size_t)seg_ack_len < sizeof(seg_ack_msg))
+    {
+      if(LORA_SendFormattedData(seg_ack_msg) == 0)
+      {
+        DEBUG_SendString("[IRBIND] segment ack sent\r\n");
+      }
+    }
+  }
+
+  if(g_irbind_ctx.received_seg_count == g_irbind_ctx.total_seg)
+  {
+    uint16_t assembled_hex_pos = 0U;
+    uint16_t bin_len = 0U;
+    uint16_t expected_hex_len = (uint16_t)(g_irbind_ctx.total_len * 2U);
+    uint8_t assembled_bin[IRBIND_MAX_DATA_LEN];
+
+    for(uint16_t i = 0U; i < g_irbind_ctx.total_seg; i++)
+    {
+      uint16_t seg_len_i = 0U;
+      uint16_t seg_start_i = 0U;
+      if(IRBind_IsSegReceived(i) == 0U)
+      {
+        IRBind_AbortSession();
+        return 1U;
+      }
+      seg_len_i = g_irbind_ctx.seg_len[i];
+      seg_start_i = g_irbind_ctx.seg_start[i];
+      if((uint32_t)assembled_hex_pos + (uint32_t)seg_len_i > (uint32_t)IRBIND_MAX_HEX_LEN)
+      {
+        IRBind_AbortSession();
+        return 1U;
+      }
+      for(uint16_t j = 0U; j < seg_len_i; j += 2U)
+      {
+        int hi = IRBind_HexNibble(g_irbind_ctx.seg_pool[seg_start_i + j]);
+        int lo = IRBind_HexNibble(g_irbind_ctx.seg_pool[seg_start_i + j + 1U]);
+        if(hi < 0 || lo < 0 || bin_len >= IRBIND_MAX_DATA_LEN)
+        {
+          IRBind_AbortSession();
+          return 1U;
+        }
+        assembled_bin[bin_len] = (uint8_t)(((uint8_t)hi << 4U) | (uint8_t)lo);
+        bin_len++;
+      }
+      assembled_hex_pos = (uint16_t)(assembled_hex_pos + seg_len_i);
+    }
+
+    if(assembled_hex_pos != expected_hex_len || bin_len != g_irbind_ctx.total_len)
+    {
+      DEBUG_SendString("[IRBIND] assembled length mismatch\r\n");
+      IRBind_AbortSession();
+      return 1U;
+    }
+
+    if(IR_Storage_Save(g_irbind_ctx.slot, assembled_bin, g_irbind_ctx.total_len) == 0)
+    {
+      char ack_msg[96];
+      int ack_len = snprintf(ack_msg, sizeof(ack_msg),
+                             "dev_%sIRBINDOK_%u_%s",
+                             g_device_code,
+                             (unsigned int)g_irbind_ctx.slot,
+                             g_irbind_ctx.session_id);
+      if(ack_len > 0 && (size_t)ack_len < sizeof(ack_msg))
+      {
+        if(LORA_SendFormattedData(ack_msg) == 0)
+        {
+          DEBUG_SendString("[IRBIND] bind done ack sent\r\n");
+          LORA_MarkUplinkAndTrackGetdata();
+        }
+      }
+    }
+
+    IRBind_AbortSession();
+  }
+
+  return 1U;
 }
 
 /**
@@ -212,6 +1139,7 @@ static void LORA_ApplyConfigSuccess(const char *mac, const char *channel)
   g_config_request_count = 0;
   g_config_retry_interval_ms = 5000;
   g_config_retry_jitter_ms = 0;
+  g_irbind_pause_active = 0;
 
   if(!g_system_initialized)
   {
@@ -346,17 +1274,523 @@ static void MainLoop_Idle(void)
   __WFI();
 }
 
+static void Main_CheckConfigRetry(void)
+{
+  if(!g_lora_configured)
+  {
+    uint32_t now = HAL_GetTick();
+    const uint32_t rx_guard_ms = 350;  // 最近收到下行后，短时间内不主动上行
+    /* 配置已下发且等待复位稳定期间，不再触发重试和重置 */
+    if(!DeferredAction_IsConfigPending() &&
+       (now - g_last_config_request_time) >= (g_config_retry_interval_ms + g_config_retry_jitter_ms))
+    {
+      if(!LORA_IsDataReady() && (now - lora_status.last_rx_time) >= rx_guard_ms)
+      {
+        if(Send_Config_Request() == 0)
+        {
+          if(g_config_retry_interval_ms < 12000)
+          {
+            g_config_retry_interval_ms += 1000;
+          }
+        }
+      }
+    }
+
+    /* 连续发送3次配置请求仍未完成配置，则重置LoRa模块并重新发起请求 */
+    if(!DeferredAction_IsConfigPending() && g_config_request_count >= 3)
+    {
+      if(LORA_Init(9600) == 0)
+      {
+        LORA_RearmRxIT();
+      }
+
+      g_config_request_count = 0;
+      g_last_config_request_time = HAL_GetTick();
+      g_config_retry_interval_ms = 5000;
+      g_config_retry_jitter_ms = 0;
+      DeferredAction_Schedule(LORA_DEFERRED_ACTION_SEND_CONFIG_REQUEST, 500U, NULL, NULL);
+    }
+  }
+}
+
+static void Main_ProcessRadarAndIr(uint8_t *last_ir_learning)
+{
+  /* 处理雷达数据 */
+  RADAR_Process();
+  IR_Process();
+
+  /* 蓝灯跟随IR学习状态：学习中亮，退出后灭 */
+  uint8_t ir_learning = (IR_Learner.state == IR_STATE_LEARNING) ? 1U : 0U;
+  if(ir_learning != *last_ir_learning)
+  {
+    if(ir_learning)
+    {
+      BLUE_LED_On();
+      if(!g_irbind_pause_active && !g_irlearn_tx_pause_active)
+      {
+        StateSender_ReportIrLearnEnterOnce();
+      }
+    }
+    else
+    {
+      BLUE_LED_Off();
+    }
+    *last_ir_learning = ir_learning;
+  }
+
+  /* IR学习完成事件：灭蓝灯并上传IR文本帧（dev_... + HEX） */
+  static uint8_t ir_frame[IR_RESP_BUFFER_SIZE];
+  uint16_t ir_frame_len = sizeof(ir_frame);
+  if(IR_TakeLearnCompleteFrame(ir_frame, &ir_frame_len) == 0)
+  {
+    BLUE_LED_Off();
+    if(!g_irbind_pause_active && !g_irlearn_tx_pause_active)
+    {
+      (void)StateSender_ReportIrLearnFrameText(ir_frame, ir_frame_len);
+    }
+  }
+}
+
+static void Main_HandleLoRaDownlink(void)
+{
+  if(!LORA_IsDataReady())
+  {
+    return;
+  }
+
+  /* 主循环非重入，使用静态工作区降低栈峰值 */
+  static uint8_t lora_rx_data[256];
+  static char rx_str[257];
+  static char payload[256];
+
+  uint16_t lora_rx_len = LORA_GetData(lora_rx_data, sizeof(lora_rx_data));
+
+  /* 重启UART接收中断，准备接收下一帧数据 */
+  LORA_RearmRxIT();
+
+  if(lora_rx_len == 0U)
+  {
+    return;
+  }
+
+  char rx_dbg[120];
+  uint16_t preview_len = (lora_rx_len > 48U) ? 48U : lora_rx_len;
+  snprintf(rx_dbg, sizeof(rx_dbg),
+            "[LORA RX] len=%u preview=%.*s\r\n",
+            (unsigned int)lora_rx_len, (int)preview_len, (char *)lora_rx_data);
+  DEBUG_SendString(rx_dbg);
+
+  /* 按\r\n拆包处理 */
+  uint16_t copy_len = (lora_rx_len < sizeof(rx_str) - 1U) ? lora_rx_len : (sizeof(rx_str) - 1U);
+  memcpy(rx_str, lora_rx_data, copy_len);
+  rx_str[copy_len] = '\0';
+
+  char *saveptr = NULL;
+  uint8_t getdata_handled = 0U;
+  char *last_line = NULL;
+  char *line = strtok_r(rx_str, "\r\n", &saveptr);
+  while(line != NULL)
+  {
+    if(line[0] != '\0')
+    {
+      StateSender_RecordDownlinkTick(HAL_GetTick());
+
+      /* 跳过同一批次重复行 */
+      if(last_line != NULL && strcmp(line, last_line) == 0)
+      {
+        line = strtok_r(NULL, "\r\n", &saveptr);
+        continue;
+      }
+      last_line = line;
+
+      /* 裸行getData是链路ACK（无设备ID封装），和payload里的GETDATA语义一致 */
+      if(strcmp(line, "getData") == 0 || strcmp(line, "GETDATA") == 0)
+      {
+        LORA_HandleGetDataAck(&getdata_handled);
+        line = strtok_r(NULL, "\r\n", &saveptr);
+        continue;
+      }
+
+      /* 过滤常见无关回显 */
+      if(strcmp(line, "OK") == 0 || strcmp(line, "Power on") == 0)
+      {
+        line = strtok_r(NULL, "\r\n", &saveptr);
+        continue;
+      }
+
+      /* 长度不足设备ID的直接忽略 */
+      if(strlen(line) < strlen(g_device_code))
+      {
+        line = strtok_r(NULL, "\r\n", &saveptr);
+        continue;
+      }
+
+      /* 先走ASCII解析，失败后回退Hex字符串解析（兼容模块转发差异） */
+      int payload_len = LORA_ParseStringPacket(
+                          (uint8_t *)line, strlen(line),
+                          g_device_code, payload, sizeof(payload));
+      if(payload_len <= 0)
+      {
+        payload_len = LORA_ParseHexStringPacket(
+                        (uint8_t *)line, strlen(line),
+                        g_device_code, payload, sizeof(payload));
+      }
+
+      if(payload_len > 0)
+      {
+        if(IRBind_HandlePayload(payload) != 0U)
+        {
+          line = strtok_r(NULL, "\r\n", &saveptr);
+          continue;
+        }
+
+        if(IRLearn_HandleChunkAck(payload) != 0U)
+        {
+          line = strtok_r(NULL, "\r\n", &saveptr);
+          continue;
+        }
+
+        /* 原地转大写，兼容RELAYOn/RELAYOff等混合大小写 */
+        StrToUpper(payload);
+
+        /* 处理setting命令: settingMACCHANNEL */
+        if(strncmp(payload, "SETTING", 7) == 0)
+        {
+          /* 收到有效下行配置，重置重试间隔 */
+          g_config_retry_interval_ms = 5000;
+          g_config_retry_jitter_ms = 0;
+
+          /* 提取setting后面的参数 */
+          char *params = &payload[7];  /* 跳过"setting" */
+          uint16_t params_len = strlen(params);
+
+          /* 解析MAC和CHANNEL (格式: MAC4字符+CHANNEL2字符) */
+          if(params_len >= 6)  /* 至少需要4字符MAC+2字符CHANNEL */
+          {
+            /* 前面4个字符是MAC,后面2个字符是CHANNEL */
+            char mac[5];
+            char channel[3];
+
+            /* 提取MAC (4个字符) */
+            memcpy(mac, params, 4);
+            mac[4] = '\0';
+
+            /* 提取CHANNEL (2个字符) */
+            memcpy(channel, &params[4], 2);
+            channel[2] = '\0';
+
+#if LORA_DEBUG_VERBOSE
+            char cfg_rx_dbg[96];
+            snprintf(cfg_rx_dbg, sizeof(cfg_rx_dbg),
+                      "[LORA CFG RX] mac=%s, channel=%s\r\n", mac, channel);
+            LORA_DEBUG_LOG(cfg_rx_dbg);
+#endif
+
+            /* 调用LoRa MAC和CHANNEL配置函数 */
+            if(LORA_ConfigureMacAndChannel(mac, channel) == 0)
+            {
+#if LORA_DEBUG_VERBOSE
+              LORA_DEBUG_LOG("[LORA] MAC and CHANNEL configured successfully\r\n");
+#endif
+
+              /* 等待LoRa模块重启稳定后再完成配置收口（非阻塞） */
+              DeferredAction_Schedule(LORA_DEFERRED_ACTION_APPLY_CONFIG_SUCCESS, 500U, mac, channel);
+            }
+            else
+            {
+#if LORA_DEBUG_VERBOSE
+              LORA_DEBUG_LOG("[LORA] ERROR: Failed to configure MAC and CHANNEL\r\n");
+#endif
+            }
+          }
+          else
+          {
+#if LORA_DEBUG_VERBOSE
+            LORA_DEBUG_LOG("[LORA] ERROR: Invalid params format (need MAC+CHANNEL)\r\n");
+#endif
+          }
+
+          /* SETTING配置命令已处理，避免继续落入继电器命令分支 */
+          line = strtok_r(NULL, "\r\n", &saveptr);
+          continue;
+        }
+
+        /* 统一命令匹配：兼容附加字段、前缀动作名、混合格式 */
+        char *cmd = payload;
+        while(*cmd == ' ' || *cmd == '\t')
+        {
+          cmd++;
+        }
+
+        uint8_t is_relay1_on_cmd = 0;
+        uint8_t is_relay1_off_cmd = 0;
+        uint8_t is_relay2_on_cmd = 0;
+        uint8_t is_relay2_off_cmd = 0;
+        uint8_t is_ir_study_cmd = 0;
+        uint8_t is_ir_send_slot_cmd = 0;
+        uint8_t ir_send_slot = 0U;
+
+        if(strcmp(cmd, "ON") == 0 ||
+            strcmp(cmd, "RELAYON") == 0)
+        {
+          is_relay1_on_cmd = 1;
+        }
+
+        if(strcmp(cmd, "OFF") == 0 ||
+            strcmp(cmd, "RELAYOFF") == 0)
+        {
+          is_relay1_off_cmd = 1;
+        }
+
+        if(strcmp(cmd, "ON2") == 0 ||
+            strcmp(cmd, "RELAY2ON") == 0)
+        {
+          is_relay2_on_cmd = 1;
+        }
+
+        if(strcmp(cmd, "OFF2") == 0 ||
+            strcmp(cmd, "RELAY2OFF") == 0)
+        {
+          is_relay2_off_cmd = 1;
+        }
+
+        if(strcmp(cmd, "IRSTUDY") == 0 || strcmp(cmd, "IRLEARN") == 0)
+        {
+          is_ir_study_cmd = 1;
+        }
+        else if(strncmp(cmd, "IRSEND_SLOT_", 12) == 0)
+        {
+          char *endptr = NULL;
+          unsigned long slot_ul = strtoul(&cmd[12], &endptr, 10);
+          if(endptr != &cmd[12] &&
+              endptr != NULL &&
+              *endptr == '\0' &&
+              slot_ul >= 1UL &&
+              slot_ul <= (unsigned long)IR_STORAGE_SLOT_COUNT)
+          {
+            is_ir_send_slot_cmd = 1U;
+            ir_send_slot = (uint8_t)slot_ul;
+          }
+          else
+          {
+            char ir_slot_err[128];
+            snprintf(ir_slot_err, sizeof(ir_slot_err),
+                      "[IR] invalid IRSEND_SLOT cmd: %.64s\r\n", cmd);
+            LORA_DEBUG_LOG(ir_slot_err);
+          }
+        }
+
+#if LORA_DEBUG_VERBOSE
+        char lora_cmd_dbg[200];
+        snprintf(lora_cmd_dbg, sizeof(lora_cmd_dbg),
+                  "[LORA CMD] cmd=%.96s, r1_on=%u, r1_off=%u, r2_on=%u, r2_off=%u\r\n",
+                  cmd,
+                  (unsigned int)is_relay1_on_cmd,
+                  (unsigned int)is_relay1_off_cmd,
+                  (unsigned int)is_relay2_on_cmd,
+                  (unsigned int)is_relay2_off_cmd);
+        LORA_DEBUG_LOG(lora_cmd_dbg);
+#endif
+
+        /* 处理继电器命令 */
+        if(is_relay1_on_cmd)
+        {
+          if(g_lora_configured)
+          {
+            RELAY_On();
+            StateSender_ReportRelayActionOnce();
+#if LORA_DEBUG_VERBOSE
+            char relay_dbg[96];
+            snprintf(relay_dbg, sizeof(relay_dbg),
+                      "[RELAY1] ON exec, state=%u\r\n",
+                      (unsigned int)RELAY_GetState());
+            LORA_DEBUG_LOG(relay_dbg);
+#endif
+          }
+        }
+        else if(strcmp(cmd, "GETDATA") == 0 || strncmp(cmd, "GETDATA", 7) == 0)
+        {
+          LORA_HandleGetDataAck(&getdata_handled);
+        }
+        else if(is_relay1_off_cmd)
+        {
+          if(g_lora_configured)
+          {
+            RELAY_Off();
+            StateSender_ReportRelayActionOnce();
+#if LORA_DEBUG_VERBOSE
+            char relay_dbg[96];
+            snprintf(relay_dbg, sizeof(relay_dbg),
+                      "[RELAY1] OFF exec, state=%u\r\n",
+                      (unsigned int)RELAY_GetState());
+            LORA_DEBUG_LOG(relay_dbg);
+#endif
+          }
+        }
+        else if(is_relay2_on_cmd)
+        {
+          if(g_lora_configured)
+          {
+            RELAY2_On();
+            StateSender_ReportRelayActionOnce();
+#if LORA_DEBUG_VERBOSE
+            char relay_dbg[96];
+            snprintf(relay_dbg, sizeof(relay_dbg),
+                      "[RELAY2] ON exec, state=%u\r\n",
+                      (unsigned int)RELAY2_GetState());
+            LORA_DEBUG_LOG(relay_dbg);
+#endif
+          }
+        }
+        else if(is_relay2_off_cmd)
+        {
+          if(g_lora_configured)
+          {
+            RELAY2_Off();
+            StateSender_ReportRelayActionOnce();
+#if LORA_DEBUG_VERBOSE
+            char relay_dbg[96];
+            snprintf(relay_dbg, sizeof(relay_dbg),
+                      "[RELAY2] OFF exec, state=%u\r\n",
+                      (unsigned int)RELAY2_GetState());
+            LORA_DEBUG_LOG(relay_dbg);
+#endif
+          }
+        }
+        else if(is_ir_study_cmd)
+        {
+          if(IR_EnterLearnMode() == 0)
+          {
+            LORA_DEBUG_LOG("[IR] Learn mode started\r\n");
+          }
+          else
+          {
+            LORA_DEBUG_LOG("[IR] Learn mode start failed\r\n");
+          }
+        }
+        else if(is_ir_send_slot_cmd)
+        {
+          if(IR_SendSlot(ir_send_slot) == 0)
+          {
+            char ir_slot_ok[80];
+            snprintf(ir_slot_ok, sizeof(ir_slot_ok),
+                      "[IR] IRSEND_SLOT exec ok, slot=%u\r\n",
+                      (unsigned int)ir_send_slot);
+            LORA_DEBUG_LOG(ir_slot_ok);
+          }
+          else
+          {
+            char ir_slot_fail[80];
+            snprintf(ir_slot_fail, sizeof(ir_slot_fail),
+                      "[IR] IRSEND_SLOT exec failed, slot=%u\r\n",
+                      (unsigned int)ir_send_slot);
+            LORA_DEBUG_LOG(ir_slot_fail);
+          }
+        }
+        else
+        {
+#if LORA_DEBUG_VERBOSE
+          char unknown_cmd_msg[160];
+          snprintf(unknown_cmd_msg, sizeof(unknown_cmd_msg),
+                    "[LORA] Unknown payload: %.120s\r\n", payload);
+          LORA_DEBUG_LOG(unknown_cmd_msg);
+#endif
+        }
+      }
+      else
+      {
+        size_t line_len = strlen(line);
+        if(line_len >= 24U)
+        {
+          uint8_t all_digits = 1U;
+          for(size_t i = 0; i < line_len; i++)
+          {
+            if(line[i] < '0' || line[i] > '9')
+            {
+              all_digits = 0U;
+              break;
+            }
+          }
+          if(all_digits)
+          {
+            char tail_only_msg[80];
+            snprintf(tail_only_msg, sizeof(tail_only_msg),
+                      "[LORA RX] RX_TAIL_ONLY_SUSPECT len=%u\r\n",
+                      (unsigned int)line_len);
+            DEBUG_SendString(tail_only_msg);
+          }
+        }
+        if(strstr(line, "IRBIND") != NULL || strstr(line, "irbind") != NULL)
+        {
+          DEBUG_SendString("[IRBIND] parse miss\r\n");
+        }
+#if LORA_DEBUG_VERBOSE
+        char parse_fail_dbg[320];
+        snprintf(parse_fail_dbg, sizeof(parse_fail_dbg),
+                  "[LORA RX IGNORE] line=%s\r\n", line);
+        LORA_DEBUG_LOG(parse_fail_dbg);
+#endif
+      }
+    }
+
+    line = strtok_r(NULL, "\r\n", &saveptr);
+  }
+}
+
+static void Main_RunPeriodicTasks(uint32_t *last_sensor_output_time,
+                                  uint8_t *last_radar_has_person,
+                                  uint32_t sensor_output_interval)
+{
+  /* 每500ms处理并输出一次传感器状态 */
+  if(g_lora_configured && (HAL_GetTick() - *last_sensor_output_time >= sensor_output_interval))
+  {
+    Process_Sensor_Status(last_radar_has_person);
+    *last_sensor_output_time = HAL_GetTick();
+  }
+
+  /* 状态发送机调度 - 只有在服务器配置成功后才发送数据 */
+  if(g_lora_configured && !g_irbind_pause_active && !g_irlearn_tx_pause_active)
+  {
+    StateSender_Update();
+  }
+
+  /* 上报后若在窗口期内未收到getData，则记为一次超时 */
+  if(g_lora_configured && g_waiting_getdata_ack)
+  {
+    const uint32_t getdata_timeout_ms = 7000;
+    if((HAL_GetTick() - g_last_uplink_time) >= getdata_timeout_ms)
+    {
+      g_getdata_miss_count++;
+      g_waiting_getdata_ack = 0;
+    }
+  }
+
+  /* 连续3次未收到getData，退出发送模式并重初始化LoRa */
+  if(g_lora_configured && g_getdata_miss_count >= 3)
+  {
+#if LORA_DEBUG_VERBOSE
+    LORA_DEBUG_LOG("[LORA] getData timeout x3, exit send mode and reinit\r\n");
+#endif
+
+    LORA_ReinitAndConfig();
+  }
+}
+
 int main(void)
 {
   HAL_Init();
   SystemClock_Config();
+  ITM_SWV_Init();              // 初始化ITM/SWV调试输出（不占用UART）
   MX_GPIO_Init();              // 初始化GPIO
-  MX_USART1_UART_Init();       // 初始化USART1（调试串口）
+  MX_USART1_UART_Init();       // 初始化USART1（红外学习模块）
   MX_USART2_UART_Init();       // 初始化USART2（LoRa串口）
   MX_USART3_UART_Init();       // 初始化USART3（雷达串口）
   SHT30_Soft_Init();            // 初始化软件I2C
   MHZ19B_PWM_Init();            // 初始化MH-Z19B CO2传感器（PWM方式）
-
+  if(IR_Init() != 0)
+  {
+    LORA_DEBUG_LOG("[IR] Init failed\r\n");
+  }
   /* 点亮红色LED，表示光传感器探测与初始化开始 */
   RED_LED_On();
 
@@ -366,35 +1800,9 @@ int main(void)
   /* 检测VEML7700光传感器 */
   if(VEML7700_IsConnected() == 0)
   {
-    LORA_DEBUG_LOG("[LIGHT] VEML7700 detected on I2C bus\r\n");
     if(VEML7700_Soft_Init() == 0)
     {
-      LORA_DEBUG_LOG("[LIGHT] VEML7700 initialized successfully\r\n");
-
-      /* 读取配置寄存器验证 */
-      uint16_t config_reg = 0;
-      if(VEML7700_ReadReg(0x00, &config_reg) == 0)
-      {
-        LORA_DEBUG_CODE(
-          char conf_msg[64];
-          snprintf(conf_msg, sizeof(conf_msg), "[LIGHT] Config Reg: 0x%04X\r\n", config_reg);
-          LORA_DEBUG_LOG(conf_msg);
-        );
-        (void)config_reg;  // 避免未使用变量警告
-      }
-
-      /* 读取ALS高字节寄存器 */
-      uint16_t als_high = 0, als_low = 0;
-      if(VEML7700_ReadReg(0x04, &als_high) == 0 && VEML7700_ReadReg(0x05, &als_low) == 0)
-      {
-        LORA_DEBUG_CODE(
-          char als_msg[64];
-          snprintf(als_msg, sizeof(als_msg), "[LIGHT] ALS Raw: 0x%04X 0x%04X\r\n", als_high, als_low);
-          LORA_DEBUG_LOG(als_msg);
-        );
-        (void)als_high;  // 避免未使用变量警告
-        (void)als_low;   // 避免未使用变量警告
-      }
+      /* initialized */
     }
     else
     {
@@ -439,8 +1847,6 @@ int main(void)
   }
   else
   {
-    LORA_DEBUG_LOG("[LORA] LoRa initialized successfully\r\n");
-
     /* LoRa初始化成功后，立即发送设备ID请求 */
     Send_Config_Request();
 
@@ -457,6 +1863,7 @@ int main(void)
 
   /* 雷达状态变量 */
   static uint8_t last_radar_has_person = 1;  // 上次雷达状态（0=无人，1=有人），默认有人
+  static uint8_t last_ir_learning = 0xFFU;   // 上次学习状态，0xFF表示未初始化
 
   while (1)
   {
@@ -465,377 +1872,10 @@ int main(void)
     SoundAccumulator_Update();  /* 按采样周期采集声音 */
     StateSender_BackgroundTick();  /* 推进状态发送器后台任务（含CO2） */
     LORA_ProcessDeferredAction();  /* 非阻塞处理LoRa延迟动作 */
-
-    /* 如果LoRa未配置，检查是否需要重试发送配置请求 */
-    if(!g_lora_configured)
-    {
-      uint32_t now = HAL_GetTick();
-      const uint32_t rx_guard_ms = 350;  // 最近收到下行后，短时间内不主动上行
-      /* 配置已下发且等待复位稳定期间，不再触发重试和重置 */
-      if(!DeferredAction_IsConfigPending() &&
-         (now - g_last_config_request_time) >= (g_config_retry_interval_ms + g_config_retry_jitter_ms))
-      {
-        if(!LORA_IsDataReady() && (now - lora_status.last_rx_time) >= rx_guard_ms)
-        {
-          if(Send_Config_Request() == 0)
-          {
-            if(g_config_retry_interval_ms < 12000)
-            {
-              g_config_retry_interval_ms += 1000;
-            }
-          }
-        }
-      }
-
-      /* 连续发送3次配置请求仍未完成配置，则重置LoRa模块并重新发起请求 */
-      if(!DeferredAction_IsConfigPending() && g_config_request_count >= 3)
-      {
-        if(LORA_Init(9600) == 0)
-        {
-          LORA_RearmRxIT();
-        }
-
-        g_config_request_count = 0;
-        g_last_config_request_time = HAL_GetTick();
-        g_config_retry_interval_ms = 5000;
-        g_config_retry_jitter_ms = 0;
-        DeferredAction_Schedule(LORA_DEFERRED_ACTION_SEND_CONFIG_REQUEST, 500U, NULL, NULL);
-      }
-    }
-
-    /* 处理雷达数据 */
-    RADAR_Process();
-
-    /* 检查LoRa是否接收到数据 */
-    if(LORA_IsDataReady())
-    {
-      uint8_t lora_rx_data[256];
-      uint16_t lora_rx_len = LORA_GetData(lora_rx_data, sizeof(lora_rx_data));
-
-      /* 重启UART接收中断，准备接收下一帧数据 */
-      LORA_RearmRxIT();
-
-      if(lora_rx_len > 0)
-      {
-        LORA_DEBUG_CODE(
-          char debug_msg[64];
-          snprintf(debug_msg, sizeof(debug_msg),
-                   "[LORA] My Device ID: %s\r\n", g_device_code);
-          LORA_DEBUG_LOG(debug_msg);
-        );
-
-        /* 按\r\n拆包处理 */
-        char rx_str[257];
-        uint16_t copy_len = (lora_rx_len < sizeof(rx_str) - 1) ? lora_rx_len : (sizeof(rx_str) - 1);
-        memcpy(rx_str, lora_rx_data, copy_len);
-        rx_str[copy_len] = '\0';
-
-#if LORA_DEBUG_VERBOSE
-        char lora_raw_dbg[360];
-        snprintf(lora_raw_dbg, sizeof(lora_raw_dbg),
-                 "[LORA RX RAW] len=%u, data=%s\r\n",
-                 (unsigned int)copy_len, rx_str);
-        LORA_DEBUG_LOG(lora_raw_dbg);
-#endif
-
-        char *saveptr = NULL;
-        uint8_t getdata_handled = 0;
-        char *last_line = NULL;
-        char *line = strtok_r(rx_str, "\r\n", &saveptr);
-        while(line != NULL)
-        {
-          if(line[0] != '\0')
-          {
-#if LORA_DEBUG_VERBOSE
-            char lora_line_dbg[320];
-            snprintf(lora_line_dbg, sizeof(lora_line_dbg),
-                     "[LORA RX LINE] %s\r\n", line);
-            LORA_DEBUG_LOG(lora_line_dbg);
-#endif
-            StateSender_RecordDownlinkTick(HAL_GetTick());
-
-            /* 跳过同一批次重复行 */
-            if(last_line != NULL && strcmp(line, last_line) == 0)
-            {
-              line = strtok_r(NULL, "\r\n", &saveptr);
-              continue;
-            }
-            last_line = line;
-
-            /* 裸行getData是链路ACK（无设备ID封装），和payload里的GETDATA语义一致 */
-            if(strcmp(line, "getData") == 0 || strcmp(line, "GETDATA") == 0)
-            {
-              LORA_HandleGetDataAck(&getdata_handled);
-              line = strtok_r(NULL, "\r\n", &saveptr);
-              continue;
-            }
-
-            /* 过滤常见无关回显 */
-            if(strcmp(line, "OK") == 0 || strcmp(line, "Power on") == 0)
-            {
-              line = strtok_r(NULL, "\r\n", &saveptr);
-              continue;
-            }
-
-            /* 长度不足设备ID的直接忽略 */
-            if(strlen(line) < strlen(g_device_code))
-            {
-              line = strtok_r(NULL, "\r\n", &saveptr);
-              continue;
-            }
-
-            /* 使用ASCII字符串格式解析函数 */
-            char payload[256];
-            int payload_len = LORA_ParseStringPacket(
-                                (uint8_t *)line, strlen(line),
-                                g_device_code, payload, sizeof(payload));
-
-            if(payload_len > 0)
-            {
-#if LORA_DEBUG_VERBOSE
-              char lora_payload_dbg[320];
-              snprintf(lora_payload_dbg, sizeof(lora_payload_dbg),
-                       "[LORA RX PAYLOAD] %s\r\n", payload);
-              LORA_DEBUG_LOG(lora_payload_dbg);
-#endif
-
-              /* 原地转大写，兼容RELAYOn/RELAYOff等混合大小写 */
-              StrToUpper(payload);
-
-              /* 处理setting命令: settingMACCHANNEL */
-              if(strncmp(payload, "SETTING", 7) == 0)
-              {
-#if LORA_DEBUG_VERBOSE
-                LORA_DEBUG_LOG("[LORA] Processing configuration command\r\n");
-#endif
-
-                /* 收到有效下行配置，重置重试间隔 */
-                g_config_retry_interval_ms = 5000;
-                g_config_retry_jitter_ms = 0;
-
-                /* 提取setting后面的参数 */
-                char *params = &payload[7];  /* 跳过"setting" */
-                uint16_t params_len = strlen(params);
-
-#if LORA_DEBUG_VERBOSE
-                char debug_buf[128];
-                snprintf(debug_buf, sizeof(debug_buf),
-                         "[LORA] Params length: %d, Params: %.16s\r\n",
-                         params_len, params);
-                LORA_DEBUG_LOG(debug_buf);
-#endif
-
-                /* 解析MAC和CHANNEL (格式: MAC4字符+CHANNEL2字符) */
-                if(params_len >= 6)  /* 至少需要4字符MAC+2字符CHANNEL */
-                {
-                  /* 前面4个字符是MAC,后面2个字符是CHANNEL */
-                  char mac[5];
-                  char channel[3];
-
-                  /* 提取MAC (4个字符) */
-                  memcpy(mac, params, 4);
-                  mac[4] = '\0';
-
-                  /* 提取CHANNEL (2个字符) */
-                  memcpy(channel, &params[4], 2);
-                  channel[2] = '\0';
-
-                  /* 调用LoRa MAC和CHANNEL配置函数 */
-                  if(LORA_ConfigureMacAndChannel(mac, channel) == 0)
-                  {
-#if LORA_DEBUG_VERBOSE
-                    LORA_DEBUG_LOG("[LORA] MAC and CHANNEL configured successfully\r\n");
-#endif
-
-                    /* 等待LoRa模块重启稳定后再完成配置收口（非阻塞） */
-                    DeferredAction_Schedule(LORA_DEFERRED_ACTION_APPLY_CONFIG_SUCCESS, 500U, mac, channel);
-                  }
-                  else
-                  {
-#if LORA_DEBUG_VERBOSE
-                    LORA_DEBUG_LOG("[LORA] ERROR: Failed to configure MAC and CHANNEL\r\n");
-#endif
-                  }
-                }
-                else
-                {
-#if LORA_DEBUG_VERBOSE
-                  LORA_DEBUG_LOG("[LORA] ERROR: Invalid params format (need MAC+CHANNEL)\r\n");
-#endif
-                }
-              }
-
-              /* 统一命令匹配：兼容附加字段、前缀动作名、混合格式 */
-              char *cmd = payload;
-              while(*cmd == ' ' || *cmd == '\t')
-              {
-                cmd++;
-              }
-
-              uint8_t is_relay1_on_cmd = 0;
-              uint8_t is_relay1_off_cmd = 0;
-              uint8_t is_relay2_on_cmd = 0;
-              uint8_t is_relay2_off_cmd = 0;
-
-              if(strcmp(cmd, "ON") == 0 ||
-                 strcmp(cmd, "RELAYON") == 0)
-              {
-                is_relay1_on_cmd = 1;
-              }
-
-              if(strcmp(cmd, "OFF") == 0 ||
-                 strcmp(cmd, "RELAYOFF") == 0)
-              {
-                is_relay1_off_cmd = 1;
-              }
-
-              if(strcmp(cmd, "ON2") == 0 ||
-                 strcmp(cmd, "RELAY2ON") == 0)
-              {
-                is_relay2_on_cmd = 1;
-              }
-
-              if(strcmp(cmd, "OFF2") == 0 ||
-                 strcmp(cmd, "RELAY2OFF") == 0)
-              {
-                is_relay2_off_cmd = 1;
-              }
-
-#if LORA_DEBUG_VERBOSE
-              char lora_cmd_dbg[200];
-              snprintf(lora_cmd_dbg, sizeof(lora_cmd_dbg),
-                       "[LORA CMD] cmd=%s, r1_on=%u, r1_off=%u, r2_on=%u, r2_off=%u\r\n",
-                       cmd,
-                       (unsigned int)is_relay1_on_cmd,
-                       (unsigned int)is_relay1_off_cmd,
-                       (unsigned int)is_relay2_on_cmd,
-                       (unsigned int)is_relay2_off_cmd);
-              LORA_DEBUG_LOG(lora_cmd_dbg);
-#endif
-
-              /* 处理继电器命令 */
-              if(is_relay1_on_cmd)
-              {
-                if(g_lora_configured)
-                {
-                  RELAY_On();
-                  StateSender_ReportRelayActionOnce();
-#if LORA_DEBUG_VERBOSE
-                  char relay_dbg[96];
-                  snprintf(relay_dbg, sizeof(relay_dbg),
-                           "[RELAY1] ON exec, state=%u\r\n",
-                           (unsigned int)RELAY_GetState());
-                  LORA_DEBUG_LOG(relay_dbg);
-#endif
-                }
-              }
-              else if(strcmp(cmd, "GETDATA") == 0 || strncmp(cmd, "GETDATA", 7) == 0)
-              {
-                LORA_HandleGetDataAck(&getdata_handled);
-              }
-              else if(is_relay1_off_cmd)
-              {
-                if(g_lora_configured)
-                {
-                  RELAY_Off();
-                  StateSender_ReportRelayActionOnce();
-#if LORA_DEBUG_VERBOSE
-                  char relay_dbg[96];
-                  snprintf(relay_dbg, sizeof(relay_dbg),
-                           "[RELAY1] OFF exec, state=%u\r\n",
-                           (unsigned int)RELAY_GetState());
-                  LORA_DEBUG_LOG(relay_dbg);
-#endif
-                }
-              }
-              else if(is_relay2_on_cmd)
-              {
-                if(g_lora_configured)
-                {
-                  RELAY2_On();
-                  StateSender_ReportRelayActionOnce();
-#if LORA_DEBUG_VERBOSE
-                  char relay_dbg[96];
-                  snprintf(relay_dbg, sizeof(relay_dbg),
-                           "[RELAY2] ON exec, state=%u\r\n",
-                           (unsigned int)RELAY2_GetState());
-                  LORA_DEBUG_LOG(relay_dbg);
-#endif
-                }
-              }
-              else if(is_relay2_off_cmd)
-              {
-                if(g_lora_configured)
-                {
-                  RELAY2_Off();
-                  StateSender_ReportRelayActionOnce();
-#if LORA_DEBUG_VERBOSE
-                  char relay_dbg[96];
-                  snprintf(relay_dbg, sizeof(relay_dbg),
-                           "[RELAY2] OFF exec, state=%u\r\n",
-                           (unsigned int)RELAY2_GetState());
-                  LORA_DEBUG_LOG(relay_dbg);
-#endif
-                }
-              }
-              else
-              {
-#if LORA_DEBUG_VERBOSE
-                char unknown_cmd_msg[160];
-                snprintf(unknown_cmd_msg, sizeof(unknown_cmd_msg),
-                         "[LORA] Unknown payload: %s\r\n", payload);
-                LORA_DEBUG_LOG(unknown_cmd_msg);
-#endif
-              }
-            }
-            else
-            {
-#if LORA_DEBUG_VERBOSE
-              char parse_fail_dbg[320];
-              snprintf(parse_fail_dbg, sizeof(parse_fail_dbg),
-                       "[LORA RX IGNORE] line=%s\r\n", line);
-              LORA_DEBUG_LOG(parse_fail_dbg);
-#endif
-            }
-          }
-
-          line = strtok_r(NULL, "\r\n", &saveptr);
-        }
-      }
-    }
-    /* 每500ms处理并输出一次传感器状态 */
-    if(g_lora_configured && (HAL_GetTick() - last_sensor_output_time >= sensor_output_interval))
-    {
-      Process_Sensor_Status(&last_radar_has_person);
-      last_sensor_output_time = HAL_GetTick();
-    }
-
-    /* 状态发送机调度 - 只有在服务器配置成功后才发送数据 */
-    if(g_lora_configured)
-    {
-      StateSender_Update();
-    }
-
-    /* 上报后若在窗口期内未收到getData，则记为一次超时 */
-    if(g_lora_configured && g_waiting_getdata_ack)
-    {
-      const uint32_t getdata_timeout_ms = 7000;
-      if((HAL_GetTick() - g_last_uplink_time) >= getdata_timeout_ms)
-      {
-        g_getdata_miss_count++;
-        g_waiting_getdata_ack = 0;
-      }
-    }
-
-    /* 连续3次未收到getData，退出发送模式并重初始化LoRa */
-    if(g_lora_configured && g_getdata_miss_count >= 3)
-    {
-#if LORA_DEBUG_VERBOSE
-      LORA_DEBUG_LOG("[LORA] getData timeout x3, exit send mode and reinit\r\n");
-#endif
-
-      LORA_ReinitAndConfig();
-    }
+    Main_CheckConfigRetry();
+    Main_ProcessRadarAndIr(&last_ir_learning);
+    Main_HandleLoRaDownlink();
+    Main_RunPeriodicTasks(&last_sensor_output_time, &last_radar_has_person, sensor_output_interval);
 
     /* 事件驱动空闲等待：避免CPU空转且不引入固定10ms阻塞窗口 */
     MainLoop_Idle();
@@ -1114,6 +2154,16 @@ static void MX_GPIO_Init(void)
   /* 初始化绿色LED为熄灭状态 */
   HAL_GPIO_WritePin(GREEN_LED_GPIO_Port, GREEN_LED_Pin, GPIO_PIN_RESET);
 
+  /* 配置蓝色LED指示灯引脚 (PA7) */
+  GPIO_InitStruct.Pin = BLUE_LED_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;    /* 推挽输出模式 */
+  GPIO_InitStruct.Pull = GPIO_NOPULL;            /* 无上下拉 */
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;   /* 低速即可 */
+  HAL_GPIO_Init(BLUE_LED_GPIO_Port, &GPIO_InitStruct);
+
+  /* 初始化蓝色LED为熄灭状态 */
+  HAL_GPIO_WritePin(BLUE_LED_GPIO_Port, BLUE_LED_Pin, GPIO_PIN_RESET);
+
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
@@ -1220,7 +2270,7 @@ void Get_STM32_UID(char *uid_str)
   uint32_t uid_2 = uid_base[2];
 
   // 格式化为字符串：XXXXXXXX-XXXXXXXX-XXXXXXXX
-  sprintf(uid_str, "%08" PRIX32 "%08" PRIX32 "%08" PRIX32, uid_0, uid_1, uid_2);
+  (void)snprintf(uid_str, 25U, "%08" PRIX32 "%08" PRIX32 "%08" PRIX32, uid_0, uid_1, uid_2);
 }
 
 /**
@@ -1269,9 +2319,12 @@ uint8_t Process_Sensor_Status(uint8_t *last_combined_state)
       LORA_DEBUG_LOG("[SENSOR] State changed: PERSON -> NOBODY, Relay OFF (NO disconnected)\r\n");
     }
 
-    /* 立即发送一次快速状态 */
-    LORA_DEBUG_LOG("[SENSOR] Sending fast status...\r\n");
-    (void)StateSender_SendFastImmediate();
+    /* 立即发送一次快速状态（IRBIND接收期间暂停） */
+    if(!g_irbind_pause_active)
+    {
+      LORA_DEBUG_LOG("[SENSOR] Sending fast status...\r\n");
+      (void)StateSender_SendFastImmediate();
+    }
   }
 
   /* 更新上次的雷达状态 */
@@ -1286,25 +2339,25 @@ uint8_t Process_Sensor_Status(uint8_t *last_combined_state)
  */
 static void LORA_ReinitAndConfig(void)
 {
-  /* 关键：回到默认监听参数(ff,ff/00)，以便接收服务器重新分配下行 */
-  if(LORA_Init(9600) != 0)
-  {
-    /* 初始化失败时也继续进入未配置态，由后续重试拉起 */
-  }
-  LORA_RearmRxIT();
-
-  /* 退出发送模式并清空本轮getData跟踪 */
+  /* 先切回未配置态与指示灯，确保“进入重置”后立即可见为红灯呼吸 */
   g_lora_configured = 0;
   g_getdata_miss_count = 0;
   g_waiting_getdata_ack = 0;
   g_config_request_count = 0;
   g_config_retry_interval_ms = 5000;
   g_config_retry_jitter_ms = 0;
+  g_irbind_pause_active = 0;
   DeferredAction_Reset();
 
-  /* 指示状态：绿灯灭，红灯呼吸 */
   GREEN_LED_Off();
   RED_LED_Breathing_Init();
+
+  /* 关键：回到默认监听参数(ff,ff/00)，以便接收服务器重新分配下行 */
+  if(LORA_Init(9600) != 0)
+  {
+    /* 初始化失败时也继续进入未配置态，由后续重试拉起 */
+  }
+  LORA_RearmRxIT();
 
   /* 等待LoRa模块重启稳定后，请求服务器重新下发配置（非阻塞） */
   DeferredAction_Schedule(LORA_DEFERRED_ACTION_SEND_CONFIG_REQUEST, 500U, NULL, NULL);
@@ -1327,7 +2380,7 @@ void Generate_Device_Code(char *device_code)
   uint32_t uid_0 = uid_base[0];
 
   // 格式化为8位十六进制字符串
-  sprintf(device_code, "%08" PRIX32, uid_0);
+  (void)snprintf(device_code, 9U, "%08" PRIX32, uid_0);
 }
 
 /**
@@ -1340,6 +2393,12 @@ void Generate_Device_Code(char *device_code)
   */
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
+  if(huart->Instance == USART1)
+  {
+      IR_UART_RxEventCallback(huart, Size);
+      return;
+  }
+
   // 检查是否是USART3的中断（雷达数据）
   if(huart->Instance == USART3)
   {
@@ -1356,26 +2415,18 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
   */
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
-  if(huart->Instance == USART3)
+  if(huart->Instance == USART1)
+  {
+    IR_UART_ErrorCallback(huart);
+  }
+  else if(huart->Instance == USART3)
   {
     static uint32_t last_err_log_time = 0;
     static uint32_t err_count = 0;
     uint32_t err = huart->ErrorCode;
-
-    /* 清除常见错误标志 */
-    __HAL_UART_CLEAR_OREFLAG(huart);
-    __HAL_UART_CLEAR_FEFLAG(huart);
-    __HAL_UART_CLEAR_NEFLAG(huart);
-    __HAL_UART_CLEAR_PEFLAG(huart);
-
-    /* 终止当前接收并重启DMA空闲接收 */
-    (void)HAL_UART_AbortReceive(huart);
-    if(HAL_UARTEx_ReceiveToIdle_DMA(huart, Radar.rx_buffer, sizeof(Radar.rx_buffer)) == HAL_OK)
+    (void)err;
+    if(RADAR_RecoverFromUartError(huart) == 0)
     {
-      Radar.old_pos = 0;
-      Radar.accum_len = 0;
-      Radar.frame_ready = 0;
-      Radar.state = RADAR_STATE_OK;
       uint32_t now = HAL_GetTick();
       if(now - last_err_log_time >= 1000)
       {
@@ -1391,7 +2442,6 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
     }
     else
     {
-      Radar.state = RADAR_STATE_ERROR;
       uint32_t now = HAL_GetTick();
       if(now - last_err_log_time >= 1000)
       {

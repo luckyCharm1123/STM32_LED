@@ -1,0 +1,7 @@
+/home/ubuntu22/Desktop/STM32_LED/build_rel_make/CMakeFiles/LED.dir
+/home/ubuntu22/Desktop/STM32_LED/build_rel_make/CMakeFiles/size-report.dir
+/home/ubuntu22/Desktop/STM32_LED/build_rel_make/CMakeFiles/edit_cache.dir
+/home/ubuntu22/Desktop/STM32_LED/build_rel_make/CMakeFiles/rebuild_cache.dir
+/home/ubuntu22/Desktop/STM32_LED/build_rel_make/cmake/stm32cubemx/CMakeFiles/STM32_Drivers.dir
+/home/ubuntu22/Desktop/STM32_LED/build_rel_make/cmake/stm32cubemx/CMakeFiles/edit_cache.dir
+/home/ubuntu22/Desktop/STM32_LED/build_rel_make/cmake/stm32cubemx/CMakeFiles/rebuild_cache.dir

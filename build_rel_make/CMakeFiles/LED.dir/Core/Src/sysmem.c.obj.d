@@ -1,0 +1,21 @@
+CMakeFiles/LED.dir/Core/Src/sysmem.c.obj: \
+ /home/ubuntu22/Desktop/STM32_LED/Core/Src/sysmem.c \
+ /home/ubuntu22/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/arm-none-eabi/include/errno.h \
+ /home/ubuntu22/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/arm-none-eabi/include/sys/errno.h \
+ /home/ubuntu22/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/arm-none-eabi/include/sys/reent.h \
+ /home/ubuntu22/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/arm-none-eabi/include/_ansi.h \
+ /home/ubuntu22/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/arm-none-eabi/include/newlib.h \
+ /home/ubuntu22/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/arm-none-eabi/include/_newlib_version.h \
+ /home/ubuntu22/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/arm-none-eabi/include/sys/config.h \
+ /home/ubuntu22/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/arm-none-eabi/include/machine/ieeefp.h \
+ /home/ubuntu22/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/arm-none-eabi/include/sys/features.h \
+ /home/ubuntu22/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/lib/gcc/arm-none-eabi/14.3.1/include/stddef.h \
+ /home/ubuntu22/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/arm-none-eabi/include/sys/cdefs.h \
+ /home/ubuntu22/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/arm-none-eabi/include/machine/_default_types.h \
+ /home/ubuntu22/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/arm-none-eabi/include/sys/_types.h \
+ /home/ubuntu22/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/arm-none-eabi/include/machine/_types.h \
+ /home/ubuntu22/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/arm-none-eabi/include/sys/lock.h \
+ /home/ubuntu22/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/lib/gcc/arm-none-eabi/14.3.1/include/stdint.h \
+ /home/ubuntu22/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/arm-none-eabi/include/stdint.h \
+ /home/ubuntu22/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/arm-none-eabi/include/sys/_intsup.h \
+ /home/ubuntu22/.local/share/stm32cube/bundles/gnu-tools-for-stm32/14.3.1+st.2/arm-none-eabi/include/sys/_stdint.h

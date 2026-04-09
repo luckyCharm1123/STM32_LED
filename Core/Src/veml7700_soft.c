@@ -78,7 +78,7 @@ static float VEML7700_GetResolution(void)
   */
 static void VEML7700_Delay_us(uint32_t us)
 {
-  uint32_t delay = us * (SystemCoreClock / 1000000) / 5;
+  volatile uint32_t delay = us * (SystemCoreClock / 1000000U) / 5U;
   while(delay--);
 }
 
@@ -473,18 +473,29 @@ int8_t VEML7700_Soft_ReadRaw(uint16_t *als_raw)
   */
 int8_t VEML7700_Soft_ReadLux(float *lux)
 {
-  uint16_t als_raw;
+  uint16_t als_raw = 0;
+
+  return VEML7700_Soft_ReadRawLux(&als_raw, lux);
+}
+
+int8_t VEML7700_Soft_ReadRawLux(uint16_t *als_raw, float *lux)
+{
   float resolution;
 
+  if(als_raw == NULL || lux == NULL)
+  {
+    return -1;
+  }
+
   /* 读取原始数据 */
-  if(VEML7700_Soft_ReadRaw(&als_raw) != 0)
+  if(VEML7700_Soft_ReadRaw(als_raw) != 0)
   {
     return -1;
   }
 
   /* 参考Adafruit算法：按当前增益和积分时间计算分辨率 */
   resolution = VEML7700_GetResolution();
-  *lux = (float)als_raw * resolution;
+  *lux = (float)(*als_raw) * resolution;
 
   return 0;
 }

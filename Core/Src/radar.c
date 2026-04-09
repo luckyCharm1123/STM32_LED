@@ -34,6 +34,8 @@ extern UART_HandleTypeDef huart3;  /* USART3句柄 (在main.c中定义) */
 static void Radar_Process_Data(uint8_t *data, uint16_t len);
 static void Radar_Parse_Frame(uint8_t *data, uint16_t len);
 static int8_t Radar_Parse_TargetInfo(const char *str, Radar_TargetInfo_t *info);
+static uint32_t RADAR_EnterCritical(void);
+static void RADAR_ExitCritical(uint32_t primask);
 
 /* Exported functions --------------------------------------------------------*/
 
@@ -56,6 +58,40 @@ int8_t RADAR_Init(void)
     }
 
     return 0;
+}
+
+int8_t RADAR_RecoverFromUartError(UART_HandleTypeDef *huart)
+{
+    HAL_StatusTypeDef restart_status;
+    uint32_t primask;
+
+    if (huart == NULL || huart->Instance != USART3)
+    {
+        return -1;
+    }
+
+    primask = RADAR_EnterCritical();
+    __HAL_UART_CLEAR_OREFLAG(huart);
+    __HAL_UART_CLEAR_FEFLAG(huart);
+    __HAL_UART_CLEAR_NEFLAG(huart);
+    __HAL_UART_CLEAR_PEFLAG(huart);
+
+    (void)HAL_UART_AbortReceive(huart);
+    restart_status = HAL_UARTEx_ReceiveToIdle_DMA(huart, Radar.rx_buffer, sizeof(Radar.rx_buffer));
+    if (restart_status == HAL_OK)
+    {
+        Radar.old_pos = 0U;
+        Radar.accum_len = 0U;
+        Radar.frame_ready = 0U;
+        Radar.state = RADAR_STATE_OK;
+    }
+    else
+    {
+        Radar.state = RADAR_STATE_ERROR;
+    }
+    RADAR_ExitCritical(primask);
+
+    return (restart_status == HAL_OK) ? 0 : -1;
 }
 
 /**
@@ -119,9 +155,14 @@ void RADAR_UART_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 void RADAR_Process(void)
 {
     uint32_t current_time = HAL_GetTick();
+    uint32_t primask;
+    uint16_t frame_len = 0U;
+    uint8_t frame_copy[sizeof(Radar.current_frame.data)];
 
-    /* 检查累积缓冲区是否有数据且超时 */
-    if (Radar.accum_len > 0 &&
+    primask = RADAR_EnterCritical();
+
+    /* 检查累积缓冲区是否有数据且超时，并在临界区完成组帧 */
+    if (Radar.accum_len > 0U &&
         (current_time - Radar.accum_last_rx_time) > RADAR_FRAME_TIMEOUT_MS)
     {
         /* 超时，认为一帧完整了 */
@@ -131,22 +172,33 @@ void RADAR_Process(void)
         memcpy(Radar.current_frame.data, Radar.accum_buffer, copy_len);
         Radar.current_frame.length = copy_len;
         Radar.current_frame.timestamp = Radar.accum_last_rx_time;
-        Radar.frame_ready = 1;
+        Radar.frame_ready = 1U;
 
         /* 清空累积缓冲区 */
-        Radar.accum_len = 0;
+        Radar.accum_len = 0U;
     }
 
     /* 检查是否有完整帧数据 */
-    if (!Radar.frame_ready)
+    if (Radar.frame_ready == 0U)
     {
+        RADAR_ExitCritical(primask);
         return;  /* 无新数据，直接返回 */
     }
 
-    /* 解析帧数据，更新目标状态 */
-    Radar_Parse_Frame(Radar.current_frame.data, Radar.current_frame.length);
+    frame_len = Radar.current_frame.length;
+    if (frame_len > sizeof(frame_copy))
+    {
+        frame_len = sizeof(frame_copy);
+    }
+    memcpy(frame_copy, Radar.current_frame.data, frame_len);
+
     /* 清除帧就绪标志 */
-    Radar.frame_ready = 0;
+    Radar.frame_ready = 0U;
+
+    RADAR_ExitCritical(primask);
+
+    /* 在临界区外解析帧数据，降低关中断时长 */
+    Radar_Parse_Frame(frame_copy, frame_len);
 }
 
 /**
@@ -429,5 +481,20 @@ static void Radar_Process_Data(uint8_t *data, uint16_t len)
     {
         /* 累积缓冲区已满，强制完成上一帧 */
         Radar.accum_len = 0;  /* 清空，丢弃数据 */
+    }
+}
+
+static uint32_t RADAR_EnterCritical(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    return primask;
+}
+
+static void RADAR_ExitCritical(uint32_t primask)
+{
+    if ((primask & 1U) == 0U)
+    {
+        __enable_irq();
     }
 }

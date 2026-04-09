@@ -34,7 +34,20 @@ extern "C" {
 
 #define LORA_RX_BUFFER_SIZE 256  // LoRa接收缓冲区大小
 #define LORA_TIMEOUT_MS         1000  // 接收超时时间（毫秒）
-#define LORA_FORMATTED_PAYLOAD_MAX_LEN 192U  // 格式化发送最大负载长度（ASCII）
+#define LORA_TX_WIRE_MAX_BYTES  230U  // LoRa单包链路总字节上限（含协议头尾）
+#define LORA_FORMATTED_WIRE_OVERHEAD 5U // 0x6a 0x6a 0x4a + "\r\n"
+#define LORA_FORMATTED_PAYLOAD_WIRE_MAX (LORA_TX_WIRE_MAX_BYTES - LORA_FORMATTED_WIRE_OVERHEAD)
+#define LORA_FORMATTED_PAYLOAD_MAX_LEN LORA_FORMATTED_PAYLOAD_WIRE_MAX  // 实际可发送ASCII负载上限
+
+/* 是否把printf重定向到LoRa UART2（默认关闭，避免与AT命令流冲突） */
+#ifndef LORA_REDIRECT_STDIO_TO_UART2
+#define LORA_REDIRECT_STDIO_TO_UART2 0
+#endif
+
+/* LoRa功率等级默认值（对应AT+LEVELx中的x） */
+#ifndef LORA_DEFAULT_LEVEL
+#define LORA_DEFAULT_LEVEL 2U
+#endif
 
 /* ==================== 数据结构 ==================== */
 
@@ -52,11 +65,11 @@ typedef enum {
   * @brief LoRa模块状态结构体
   */
 typedef struct {
-    LORA_State_t state;        ///< 当前状态
+    volatile LORA_State_t state;        ///< 当前状态（ISR/主循环共享）
     uint8_t rx_buffer[LORA_RX_BUFFER_SIZE];  ///< 接收缓冲区
-    uint16_t rx_length;        ///< 接收到的数据长度
-    uint32_t last_rx_time;     ///< 最后接收时间戳
-    uint8_t data_ready;        ///< 数据就绪标志
+    volatile uint16_t rx_length;        ///< 接收到的数据长度（ISR/主循环共享）
+    volatile uint32_t last_rx_time;     ///< 最后接收时间戳（ISR/主循环共享）
+    volatile uint8_t data_ready;        ///< 数据就绪标志（ISR/主循环共享）
 } LORA_Status_t;
 
 /* ==================== 全局变量声明 ==================== */
@@ -81,14 +94,14 @@ int LORA_Init(uint32_t baudrate);
   * @retval 0: 成功, -1: 失败
   * @details 通过USART2发送数据到LoRa模块
   */
-int LORA_SendData(uint8_t *data, uint16_t length);
+int LORA_SendData(const uint8_t *data, uint16_t length);
 
 /**
   * @brief 发送字符串到LoRa模块
   * @param str: 要发送的字符串（以'\0'结尾）
   * @retval 0: 成功, -1: 失败
   */
-int LORA_SendString(char *str);
+int LORA_SendString(const char *str);
 
 /**
   * @brief 获取接收到的数据
@@ -161,6 +174,19 @@ int LORA_ExtractPayloadAfterDeviceID(uint8_t *rx_data, uint16_t rx_length,
 int LORA_ParseStringPacket(uint8_t *rx_data, uint16_t rx_length,
                             char *device_id, char *output_buffer,
                             uint16_t buffer_size);
+
+/**
+  * @brief 解析Hex字符串格式的LoRa数据包
+  * @param rx_data: 接收到的原始数据(Hex字符串格式)
+  * @param rx_length: 接收数据长度
+  * @param device_id: 设备ID字符串
+  * @param output_buffer: 输出缓冲区，存储提取的内容
+  * @param buffer_size: 输出缓冲区大小
+  * @retval 提取的内容长度，-1表示失败或未匹配
+  */
+int LORA_ParseHexStringPacket(uint8_t *rx_data, uint16_t rx_length,
+                               char *device_id, char *output_buffer,
+                               uint16_t buffer_size);
 
 /**
   * @brief 配置LoRa模块的MAC和CHANNEL

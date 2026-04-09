@@ -220,43 +220,20 @@ int StateSender_SendNormal(void)
   (void)StateSender_GetTempHumi(&temp, &humi);
 
   uint16_t sound_raw = SoundAccumulator_GetAverageAndReset();
-  uint16_t sound_mv = (uint16_t)(sound_raw * 3300UL / 4095UL);
-
-  LORA_DEBUG_CODE(
-    char sound_debug[128];
-    snprintf(sound_debug, sizeof(sound_debug), "[SOUND] AVG ADC:%u, Volt:%u.%03uV\r\n",
-             sound_raw, sound_mv / 1000, sound_mv % 1000);
-    LORA_DEBUG_LOG(sound_debug);
-  );
 
   float lux = 0.0f;
   int32_t lux10 = 0;
   uint16_t als_raw = 0;
   uint16_t als_conf = 0;
   uint16_t als_id = 0;
-  int8_t als_raw_ok = VEML7700_Soft_ReadRaw(&als_raw);
+  int8_t als_raw_ok = -1;
   int8_t als_conf_ok = VEML7700_ReadReg(VEML7700_REG_ALS_CONF, &als_conf);
   int8_t als_id_ok = VEML7700_ReadReg(VEML7700_REG_INT_ID, &als_id);
 
-  if(VEML7700_Soft_ReadLux(&lux) == 0)
+  if(VEML7700_Soft_ReadRawLux(&als_raw, &lux) == 0)
   {
+    als_raw_ok = 0;
     lux10 = (int32_t)(lux * 10.0f + (lux >= 0 ? 0.5f : -0.5f));
-    LORA_DEBUG_CODE(
-      char light_debug[64];
-      snprintf(light_debug, sizeof(light_debug), "[LIGHT] %ld.%01lu lux\r\n",
-               (long)(lux10 / 10), (unsigned long)(lux10 >= 0 ? (lux10 % 10) : (-(lux10 % 10))));
-      LORA_DEBUG_LOG(light_debug);
-    );
-
-    LORA_DEBUG_CODE(
-      char light_diag[128];
-      snprintf(light_diag, sizeof(light_diag),
-               "[LIGHT DBG] raw:%u conf:0x%04X id:0x%04X raw_ok:%d conf_ok:%d id_ok:%d\r\n",
-               (unsigned int)als_raw, (unsigned int)als_conf, (unsigned int)als_id,
-               als_raw_ok, als_conf_ok, als_id_ok);
-      LORA_DEBUG_LOG(light_diag);
-    );
-
     if(als_raw_ok == 0 && als_conf_ok == 0 && als_id_ok == 0 && als_raw == 0)
     {
       if(g_light_zero_streak < 255)
@@ -335,18 +312,6 @@ int StateSender_SendNormal(void)
     g_co2_last_valid_ppm = co2_ppm;
     co2_report_ppm = co2_ppm;
   }
-
-#if LORA_DEBUG_VERBOSE
-  if((co2_valid == 0) || (co2_ppm > 0 && co2_ppm < 200))
-  {
-    char co2_diag_msg[128];
-    snprintf(co2_diag_msg, sizeof(co2_diag_msg),
-             "[CO2 DBG] valid:%u ppm:%u high:%ums low:%ums period:%ums state:%u\r\n",
-             co2_valid, co2_ppm, g_co2_sm.high_time_ms, g_co2_sm.low_time_ms,
-             (uint16_t)(g_co2_sm.high_time_ms + g_co2_sm.low_time_ms), g_co2_sm.state);
-    LORA_DEBUG_LOG(co2_diag_msg);
-  }
-#endif
 
   char payload[160];
   snprintf(payload, sizeof(payload), "dev_%shumi_%ldtemp_%ldsound_%ulight_%ldP_%luR_%luS_%uRELAY_%uRELAY2_%uCO2_%u",

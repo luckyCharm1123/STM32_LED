@@ -33,7 +33,12 @@ typedef struct
 
 static MHZ19B_PwmCapture_t g_cap = {0};
 
-/* 最近一次测量诊断信息 */
+/* 最近一次测量诊断信息
+ * 并发语义说明：
+ * - g_last_* 仅在主循环上下文（状态机/查询接口）读写，不在ISR中直接访问。
+ * - ISR共享数据统一通过g_cap（成员为volatile）交换。
+ * 因此g_last_*无需volatile。
+ */
 static uint16_t g_last_high_ms = 0;
 static uint16_t g_last_low_ms = 0;
 static uint16_t g_last_period_ms = 0;

@@ -86,6 +86,14 @@ int8_t VEML7700_Soft_ReadLux(float *lux);
 int8_t VEML7700_Soft_ReadRaw(uint16_t *als_raw);
 
 /**
+  * @brief  单次读取ALS原始值并换算Lux，避免双事务不一致
+  * @param  als_raw: ALS原始数据指针
+  * @param  lux: 光照强度(lux)指针
+  * @retval 0: 成功, -1: 失败
+  */
+int8_t VEML7700_Soft_ReadRawLux(uint16_t *als_raw, float *lux);
+
+/**
   * @brief  写入VEML7700寄存器
   * @param  reg: 寄存器地址
   * @param  data: 16位数据

@@ -60,6 +60,7 @@
 extern UART_HandleTypeDef huart1;  // USART1句柄声明
 extern UART_HandleTypeDef huart2;  // USART2句柄声明
 extern UART_HandleTypeDef huart3;  // USART3句柄声明
+extern DMA_HandleTypeDef hdma_usart1_rx;  // USART1 RX DMA句柄声明
 extern DMA_HandleTypeDef hdma_usart3_rx;  // USART3 RX DMA句柄声明
 
 /* USER CODE BEGIN EV */
@@ -284,6 +285,20 @@ void SysTick_Handler(void)
 /* USER CODE BEGIN 1 */
 
 /**
+  * @brief This function handles USART1 global interrupt.
+  */
+void USART1_IRQHandler(void)
+{
+  /* USER CODE BEGIN USART1_IRQn 0 */
+
+  /* USER CODE END USART1_IRQn 0 */
+  HAL_UART_IRQHandler(&huart1);
+  /* USER CODE BEGIN USART1_IRQn 1 */
+
+  /* USER CODE END USART1_IRQn 1 */
+}
+
+/**
   * @brief This function handles USART2 global interrupt.
   */
 void USART2_IRQHandler(void)
@@ -299,6 +314,9 @@ void USART2_IRQHandler(void)
   if ((__HAL_UART_GET_IT_SOURCE(&huart2, UART_IT_IDLE) != RESET) &&
       (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_IDLE) != RESET))
   {
+    const uint8_t rxne_drain_budget = 16U;
+    uint8_t rxne_drain_count = 0U;
+
     /*
      * 严格处理顺序：
      * 1) 若此刻仍有RXNE待处理，先交给HAL搬运数据；
@@ -306,9 +324,18 @@ void USART2_IRQHandler(void)
      * 3) 最后通知上层做“帧结束”判定。
      */
     while ((__HAL_UART_GET_IT_SOURCE(&huart2, UART_IT_RXNE) != RESET) &&
-           (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE) != RESET))
+           (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE) != RESET) &&
+           (rxne_drain_count < rxne_drain_budget))
     {
       HAL_UART_IRQHandler(&huart2);
+      rxne_drain_count++;
+    }
+
+    if ((__HAL_UART_GET_IT_SOURCE(&huart2, UART_IT_RXNE) != RESET) &&
+        (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_RXNE) != RESET))
+    {
+      /* RXNE仍持续有效时，保留IDLE待下次中断继续排空，避免单次IRQ占用过久 */
+      return;
     }
 
     __HAL_UART_CLEAR_IDLEFLAG(&huart2);
@@ -337,6 +364,20 @@ void USART3_IRQHandler(void)
   /* USER CODE BEGIN USART3_IRQn 1 */
 
   /* USER CODE END USART3_IRQn 1 */
+}
+
+/**
+  * @brief This function handles DMA1 channel 5 global interrupt.
+  */
+void DMA1_Channel5_IRQHandler(void)
+{
+  /* USER CODE BEGIN DMA1_Channel5_IRQn 0 */
+
+  /* USER CODE END DMA1_Channel5_IRQn 0 */
+  HAL_DMA_IRQHandler(&hdma_usart1_rx);
+  /* USER CODE BEGIN DMA1_Channel5_IRQn 1 */
+
+  /* USER CODE END DMA1_Channel5_IRQn 1 */
 }
 
 /**

@@ -14,16 +14,35 @@ typedef struct
 
 static DeferredActionState_t g_deferred_action = {0};
 
+static uint32_t DeferredAction_EnterCritical(void)
+{
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  return primask;
+}
+
+static void DeferredAction_ExitCritical(uint32_t primask)
+{
+  if((primask & 1U) == 0U)
+  {
+    __enable_irq();
+  }
+}
+
 void DeferredAction_Reset(void)
 {
+  uint32_t primask = DeferredAction_EnterCritical();
   memset(&g_deferred_action, 0, sizeof(g_deferred_action));
   g_deferred_action.action.kind = LORA_DEFERRED_ACTION_NONE;
+  DeferredAction_ExitCritical(primask);
 }
 
 void DeferredAction_Schedule(LORA_DeferredActionKind_t kind, uint32_t delay_ms, const char *mac, const char *channel)
 {
+  uint32_t primask;
   uint32_t now = HAL_GetTick();
 
+  primask = DeferredAction_EnterCritical();
   g_deferred_action.active = 1U;
   g_deferred_action.start_ms = now;
   g_deferred_action.delay_ms = delay_ms;
@@ -43,37 +62,52 @@ void DeferredAction_Schedule(LORA_DeferredActionKind_t kind, uint32_t delay_ms, 
   {
     g_deferred_action.config_pending = 0U;
   }
+  DeferredAction_ExitCritical(primask);
 }
 
 uint8_t DeferredAction_TakeDue(LORA_DeferredAction_t *out_action)
 {
+  uint32_t primask;
   uint32_t now;
   uint32_t elapsed;
 
-  if(!g_deferred_action.active || out_action == NULL)
+  if(out_action == NULL)
   {
     return 0U;
   }
 
   now = HAL_GetTick();
+  primask = DeferredAction_EnterCritical();
+  if(!g_deferred_action.active)
+  {
+    DeferredAction_ExitCritical(primask);
+    return 0U;
+  }
   /* Wrap-safe elapsed-time check based on unsigned modular arithmetic. */
   elapsed = now - g_deferred_action.start_ms;
   if(elapsed < g_deferred_action.delay_ms)
   {
+    DeferredAction_ExitCritical(primask);
     return 0U;
   }
 
   g_deferred_action.active = 0U;
   *out_action = g_deferred_action.action;
+  DeferredAction_ExitCritical(primask);
   return 1U;
 }
 
 uint8_t DeferredAction_IsConfigPending(void)
 {
-  return g_deferred_action.config_pending;
+  uint32_t primask = DeferredAction_EnterCritical();
+  uint8_t pending = g_deferred_action.config_pending;
+  DeferredAction_ExitCritical(primask);
+  return pending;
 }
 
 void DeferredAction_ClearConfigPending(void)
 {
+  uint32_t primask = DeferredAction_EnterCritical();
   g_deferred_action.config_pending = 0U;
+  DeferredAction_ExitCritical(primask);
 }

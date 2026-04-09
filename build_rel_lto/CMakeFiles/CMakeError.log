@@ -1,0 +1,77 @@
+Detecting C compiler ABI info failed to compile with the following output:
+Change Dir: /home/ubuntu22/Desktop/STM32_LED/build_rel_lto/CMakeFiles/CMakeTmp
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_d1f11/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_d1f11.dir/build.make CMakeFiles/cmTC_d1f11.dir/build
+gmake[1]: Entering directory '/home/ubuntu22/Desktop/STM32_LED/build_rel_lto/CMakeFiles/CMakeTmp'
+Building C object CMakeFiles/cmTC_d1f11.dir/CMakeCCompilerABI.c.o
+/usr/bin/cc   -v -std=gnu11 -o CMakeFiles/cmTC_d1f11.dir/CMakeCCompilerABI.c.o -c /usr/share/cmake-3.22/Modules/CMakeCCompilerABI.c
+Using built-in specs.
+COLLECT_GCC=/usr/bin/cc
+OFFLOAD_TARGET_NAMES=nvptx-none:amdgcn-amdhsa
+OFFLOAD_TARGET_DEFAULT=1
+Target: x86_64-linux-gnu
+Configured with: ../src/configure -v --with-pkgversion='Ubuntu 12.3.0-1ubuntu1~22.04.2' --with-bugurl=file:///usr/share/doc/gcc-12/README.Bugs --enable-languages=c,ada,c++,go,d,fortran,objc,obj-c++,m2 --prefix=/usr --with-gcc-major-version-only --program-suffix=-12 --program-prefix=x86_64-linux-gnu- --enable-shared --enable-linker-build-id --libexecdir=/usr/lib --without-included-gettext --enable-threads=posix --libdir=/usr/lib --enable-nls --enable-clocale=gnu --enable-libstdcxx-debug --enable-libstdcxx-time=yes --with-default-libstdcxx-abi=new --enable-gnu-unique-object --disable-vtable-verify --enable-plugin --enable-default-pie --with-system-zlib --enable-libphobos-checking=release --with-target-system-zlib=auto --enable-objc-gc=auto --enable-multiarch --disable-werror --enable-cet --with-arch-32=i686 --with-abi=m64 --with-multilib-list=m32,m64,mx32 --enable-multilib --with-tune=generic --enable-offload-targets=nvptx-none=/build/gcc-12-dNWB6h/gcc-12-12.3.0/debian/tmp-nvptx/usr,amdgcn-amdhsa=/build/gcc-12-dNWB6h/gcc-12-12.3.0/debian/tmp-gcn/usr --enable-offload-defaulted --without-cuda-driver --enable-checking=release --build=x86_64-linux-gnu --host=x86_64-linux-gnu --target=x86_64-linux-gnu
+Thread model: posix
+Supported LTO compression algorithms: zlib zstd
+gcc version 12.3.0 (Ubuntu 12.3.0-1ubuntu1~22.04.2) 
+COLLECT_GCC_OPTIONS='-v' '-std=gnu11' '-o' 'CMakeFiles/cmTC_d1f11.dir/CMakeCCompilerABI.c.o' '-c' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_d1f11.dir/'
+ /usr/lib/gcc/x86_64-linux-gnu/12/cc1 -quiet -v -imultiarch x86_64-linux-gnu /usr/share/cmake-3.22/Modules/CMakeCCompilerABI.c -quiet -dumpdir CMakeFiles/cmTC_d1f11.dir/ -dumpbase CMakeCCompilerABI.c.c -dumpbase-ext .c -mtune=generic -march=x86-64 -std=gnu11 -version -fasynchronous-unwind-tables -fstack-protector-strong -Wformat -Wformat-security -fstack-clash-protection -fcf-protection -o /tmp/ccMSFRii.s
+GNU C11 (Ubuntu 12.3.0-1ubuntu1~22.04.2) version 12.3.0 (x86_64-linux-gnu)
+	compiled by GNU C version 12.3.0, GMP version 6.2.1, MPFR version 4.1.0, MPC version 1.2.1, isl version isl-0.24-GMP
+
+GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072
+ignoring nonexistent directory "/usr/local/include/x86_64-linux-gnu"
+ignoring nonexistent directory "/usr/lib/gcc/x86_64-linux-gnu/12/include-fixed"
+ignoring nonexistent directory "/usr/lib/gcc/x86_64-linux-gnu/12/../../../../x86_64-linux-gnu/include"
+#include "..." search starts here:
+#include <...> search starts here:
+ /usr/lib/gcc/x86_64-linux-gnu/12/include
+ /usr/local/include
+ /usr/include/x86_64-linux-gnu
+ /usr/include
+End of search list.
+GNU C11 (Ubuntu 12.3.0-1ubuntu1~22.04.2) version 12.3.0 (x86_64-linux-gnu)
+	compiled by GNU C version 12.3.0, GMP version 6.2.1, MPFR version 4.1.0, MPC version 1.2.1, isl version isl-0.24-GMP
+
+GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072
+Compiler executable checksum: 3b3e5ca6847cd8b7efa555b335574cff
+COLLECT_GCC_OPTIONS='-v' '-std=gnu11' '-o' 'CMakeFiles/cmTC_d1f11.dir/CMakeCCompilerABI.c.o' '-c' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_d1f11.dir/'
+ as -v --64 -o CMakeFiles/cmTC_d1f11.dir/CMakeCCompilerABI.c.o /tmp/ccMSFRii.s
+GNU assembler version 2.38 (x86_64-linux-gnu) using BFD version (GNU Binutils for Ubuntu) 2.38
+COMPILER_PATH=/usr/lib/gcc/x86_64-linux-gnu/12/:/usr/lib/gcc/x86_64-linux-gnu/12/:/usr/lib/gcc/x86_64-linux-gnu/:/usr/lib/gcc/x86_64-linux-gnu/12/:/usr/lib/gcc/x86_64-linux-gnu/
+LIBRARY_PATH=/usr/lib/gcc/x86_64-linux-gnu/12/:/usr/lib/gcc/x86_64-linux-gnu/12/../../../x86_64-linux-gnu/:/usr/lib/gcc/x86_64-linux-gnu/12/../../../../lib/:/lib/x86_64-linux-gnu/:/lib/../lib/:/usr/lib/x86_64-linux-gnu/:/usr/lib/../lib/:/usr/lib/gcc/x86_64-linux-gnu/12/../../../:/lib/:/usr/lib/
+COLLECT_GCC_OPTIONS='-v' '-std=gnu11' '-o' 'CMakeFiles/cmTC_d1f11.dir/CMakeCCompilerABI.c.o' '-c' '-mtune=generic' '-march=x86-64' '-dumpdir' 'CMakeFiles/cmTC_d1f11.dir/CMakeCCompilerABI.c.'
+Linking C executable cmTC_d1f11
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_d1f11.dir/link.txt --verbose=1
+/usr/bin/cc -mcpu=cortex-m3 -T "/home/ubuntu22/Desktop/STM32_LED/STM32F103XX_FLASH.ld" --specs=nano.specs -Wl,-Map=LED.map -Wl,--gc-sections -Wl,--print-memory-usage -flto -v CMakeFiles/cmTC_d1f11.dir/CMakeCCompilerABI.c.o -o cmTC_d1f11 
+cc: warning: '-mcpu=' is deprecated; use '-mtune=' or '-march=' instead
+Using built-in specs.
+Reading specs from nano.specs
+cc: fatal error: cannot read spec file 'nano.specs': No such file or directory
+compilation terminated.
+gmake[1]: *** [CMakeFiles/cmTC_d1f11.dir/build.make:99: cmTC_d1f11] Error 1
+gmake[1]: Leaving directory '/home/ubuntu22/Desktop/STM32_LED/build_rel_lto/CMakeFiles/CMakeTmp'
+gmake: *** [Makefile:127: cmTC_d1f11/fast] Error 2
+
+
+
+
+Determining if the C compiler works failed with the following output:
+Change Dir: /home/ubuntu22/Desktop/STM32_LED/build_rel_lto/CMakeFiles/CMakeTmp
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_d8fda/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_d8fda.dir/build.make CMakeFiles/cmTC_d8fda.dir/build
+gmake[1]: Entering directory '/home/ubuntu22/Desktop/STM32_LED/build_rel_lto/CMakeFiles/CMakeTmp'
+Building C object CMakeFiles/cmTC_d8fda.dir/testCCompiler.c.o
+/usr/bin/cc   -std=gnu11 -o CMakeFiles/cmTC_d8fda.dir/testCCompiler.c.o -c /home/ubuntu22/Desktop/STM32_LED/build_rel_lto/CMakeFiles/CMakeTmp/testCCompiler.c
+Linking C executable cmTC_d8fda
+/usr/bin/cmake -E cmake_link_script CMakeFiles/cmTC_d8fda.dir/link.txt --verbose=1
+/usr/bin/cc -mcpu=cortex-m3 -T "/home/ubuntu22/Desktop/STM32_LED/STM32F103XX_FLASH.ld" --specs=nano.specs -Wl,-Map=LED.map -Wl,--gc-sections -Wl,--print-memory-usage -flto  CMakeFiles/cmTC_d8fda.dir/testCCompiler.c.o -o cmTC_d8fda 
+cc: warning: ‘-mcpu=’ is deprecated; use ‘-mtune=’ or ‘-march=’ instead
+cc: fatal error: cannot read spec file ‘nano.specs’: No such file or directory
+compilation terminated.
+gmake[1]: *** [CMakeFiles/cmTC_d8fda.dir/build.make:99: cmTC_d8fda] Error 1
+gmake[1]: Leaving directory '/home/ubuntu22/Desktop/STM32_LED/build_rel_lto/CMakeFiles/CMakeTmp'
+gmake: *** [Makefile:127: cmTC_d8fda/fast] Error 2
+
+
+

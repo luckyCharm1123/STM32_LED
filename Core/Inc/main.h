@@ -49,6 +49,10 @@ extern "C" {
 #define LORA_DEBUG_VERBOSE 0
 #endif
 
+#ifndef DEBUG_SEMIHOSTING_FALLBACK
+#define DEBUG_SEMIHOSTING_FALLBACK 0
+#endif
+
 #if LORA_DEBUG_VERBOSE
 #define LORA_DEBUG_LOG(msg) \
   do { \
@@ -79,7 +83,7 @@ extern "C" {
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-void DEBUG_SendString(const char *str);
+void DEBUG_SendString(const char *str);  /* ITM/SWV调试输出（不占用UART） */
 void Get_STM32_UID(char *uid_str);  /* 获取STM32唯一ID */
 void RELAY_On(void);                /* 打开继电器 */
 void RELAY_Off(void);               /* 关闭继电器 */
@@ -102,6 +106,9 @@ uint8_t RELAY2_GetState(void);      /* 获取继电器2状态 */
 
 #define GREEN_LED_Pin GPIO_PIN_0
 #define GREEN_LED_GPIO_Port GPIOA
+
+#define BLUE_LED_Pin GPIO_PIN_7
+#define BLUE_LED_GPIO_Port GPIOA
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

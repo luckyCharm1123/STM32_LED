@@ -118,6 +118,7 @@ int8_t RADAR_Init(void);
  * @param  Size: 当前DMA缓冲区中的数据量
  */
 void RADAR_UART_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size);
+int8_t RADAR_RecoverFromUartError(UART_HandleTypeDef *huart);
 
 /**
  * @brief  处理雷达数据帧 (在主循环中调用)

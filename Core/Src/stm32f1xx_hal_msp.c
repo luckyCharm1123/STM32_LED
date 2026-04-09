@@ -89,6 +89,7 @@ void HAL_MspInit(void)
 /* 外部变量声明 */
 extern UART_HandleTypeDef huart3;  // USART3句柄
 extern DMA_HandleTypeDef hdma_usart3_rx;  // USART3 RX DMA句柄
+DMA_HandleTypeDef hdma_usart1_rx;  // USART1 RX DMA句柄定义（IR模块）
 
 /**
   * @brief ADC MSP Initialization
@@ -179,9 +180,33 @@ void HAL_UART_MspInit(UART_HandleTypeDef *huart)
     /* 配置USART1_RX引脚 (PA10) */
     GPIO_InitStruct.Pin = GPIO_PIN_10;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_INPUT;       // 复用输入模式
-    GPIO_InitStruct.Pull = GPIO_NOPULL;              // 无上下拉
+    GPIO_InitStruct.Pull = GPIO_PULLUP;              // UART空闲高电平，上拉可抑制浮空噪声
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
     
+    /* USART1中断配置 */
+    HAL_NVIC_SetPriority(USART1_IRQn, 0, 1);
+    HAL_NVIC_EnableIRQ(USART1_IRQn);
+
+    /* USART1 DMA配置: USART1_RX -> DMA1_Channel5 */
+    hdma_usart1_rx.Instance = DMA1_Channel5;
+    hdma_usart1_rx.Init.Direction = DMA_PERIPH_TO_MEMORY;
+    hdma_usart1_rx.Init.PeriphInc = DMA_PINC_DISABLE;
+    hdma_usart1_rx.Init.MemInc = DMA_MINC_ENABLE;
+    hdma_usart1_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+    hdma_usart1_rx.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
+    hdma_usart1_rx.Init.Mode = DMA_CIRCULAR;
+    hdma_usart1_rx.Init.Priority = DMA_PRIORITY_HIGH;
+
+    __HAL_LINKDMA(huart, hdmarx, hdma_usart1_rx);
+
+    if(HAL_DMA_Init(&hdma_usart1_rx) != HAL_OK)
+    {
+      Error_Handler();
+    }
+
+    HAL_NVIC_SetPriority(DMA1_Channel5_IRQn, 0, 0);
+    HAL_NVIC_EnableIRQ(DMA1_Channel5_IRQn);
+
     /* USER CODE BEGIN USART1_MspInit 1 */
 
     /* USER CODE END USART1_MspInit 1 */
@@ -406,6 +431,11 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef *huart)
     PA10    ------> USART1_RX
     */
     HAL_GPIO_DeInit(GPIOA, GPIO_PIN_9 | GPIO_PIN_10);  // 复位GPIO引脚
+
+    HAL_DMA_DeInit(huart->hdmarx);
+
+    HAL_NVIC_DisableIRQ(USART1_IRQn);
+    HAL_NVIC_DisableIRQ(DMA1_Channel5_IRQn);
     
     /* USER CODE BEGIN USART1_MspDeInit 1 */
 
